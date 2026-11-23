@@ -1,0 +1,62 @@
+{
+  "base_commit": "d84db55712aba0d40811d7762cb052f05d55b7e5",
+  "target": "kv260",
+  "arch_hash": "e9ed9d11",
+  "source_count": 32,
+  "stages": [
+    {
+      "core_mhz": 225.0,
+      "build_id": "d638198b",
+      "patch": "225mhz-sources.patch",
+      "patch_sha256": "44e38dc115695939ef01bcc47d72774041e35650b5d780df5ff16911c9bac4d9",
+      "files_sha256": {
+        "boards/kv260/build.py": "bfe7deb499cd8244cefbddb66b86dd50d898c9832f85059b9617556880ba3a43",
+        "boards/kv260/constraints/kv260.xdc": "a9e49e515cc64a534629f1028fc019cc59dcdb4b940ab0c7e9714e3567ad64a4",
+        "boards/kv260/vivado/build.tcl": "6b026ceddfbb54d3f80e92cf2a3903bb0dd76176c47de77db747fef695a55fc4",
+        "opentpu/target.py": "c8e160d9422dd84990050e9b7a62345bbbce6829a90c966616d7f0687b0bf9cc",
+        "rtl/boards/kv260/otpu_kv260_core.sv": "7c0fb7b0d945a2112fecfe4938642a5427880c0c66cf4279f86c65887feb4c22",
+        "rtl/dma/otpu_dma.sv": "d379df885ceb749083b2c2426e23c8508fc346c3b96f2bae73cf44edae27b439",
+        "rtl/mem/otpu_actram.sv": "6ea0c60edf550ecacebf4a99fc942a35dd474dc1f0edf5e9c7ac105c179b4e4a",
+        "rtl/mem/otpu_hbm_ch.sv": "786fa41ff8d4cca545ced88c45b3fe3a350c25368890d0479edebff7fa415999",
+        "rtl/mem/otpu_native_dram.sv": "e62df53269832a1f564456dcd5e7205c4d126dbf0df8f0a1709b34bf8bb2d1c1",
+        "rtl/mem/otpu_tmem.sv": "699c1b1f6d7fbccb9d1e58c39d8c07a32ba11cbfee168fa00e8f315620ce90f1",
+        "rtl/mem/otpu_xstg.sv": "18ff27d5bdd2a21c3d08178330c8737729e4dec855269e17ab15d0699476c214",
+        "rtl/mxu/otpu_mxu.sv": "b18c5ba83fbbba8c0f2833debfeb6159d7206e509341c365f7812efcb111f19d",
+        "rtl/seq/otpu_seq.sv": "bc6cd2e94f6ed135475dabc4ed80b71309330b2c481b246d537331535f07af7c",
+        "rtl/shell/otpu_afifo.sv": "366f9ac419bc1283eb40f8c37b7310279c6d4f6104f3a2f05d05f4edc42be77d",
+        "rtl/shell/otpu_axi_split2.sv": "de0d90772fa3b9053dd8a4b4158fde05f087753c3d3f4ed59d7409c3581843a3",
+        "rtl/shell/otpu_board.sv": "5030b1f94ee412b0edf47b7120a469a6944dc3a0e6fcc97126c15c48a9dc61b6",
+        "rtl/shell/otpu_ctrl.sv": "98901a74eb1f8fbd7fd4e08bd3e967c4e0b2f52d6e50770a0c3b1581d392dd03",
+        "rtl/shell/otpu_mem_ch.sv": "63291d6dc205516899f24abf163f57b74430ac02b7d0f13da440e9d60d81a770",
+        "rtl/shell/otpu_trace.sv": "64a85e80845410320e9e156e639ccdfd4fbdc36e245514c8e10feac5c806eff7",
+        "rtl/tech/generic/otpu_tech_ram.sv": "f75d902edce4322a8a78e7fdcb6bcc42ce29ed4159121e95faf4a66e8a82f090",
+        "rtl/tech/xilinxus/otpu_tech_dsp.sv": "846db29048a5b1ce5d2ddf3f1f290214c83a3f804b3fd239ad9d88ee58519187",
+        "rtl/top/otpu_coll.sv": "8d53cfc8a5a414b88a80a9ebc5ed440edfb1181dfb4b720ecf1cefbe062b4138",
+        "rtl/top/otpu_pkg.sv": "a79261f83a06c8180c15bb3615770dc8d99c2f5976dbe5e0a23d9ac458bd35fe",
+        "rtl/top/otpu_slice.sv": "4561cde6c976831816c84e471411e661cc77d08469fb12e6dbd98521a206a8e0",
+        "rtl/vpu/otpu_fp.sv": "c388222284d5ab981bb115c6fd96bc96402d89908373f815b6e82ad547b281f1",
+        "rtl/vpu/otpu_fpipe.sv": "36aa06bf2a7f6419c11f6e27f3326a558eec4018fb0e0b1fc2f1b65c1417fe0d",
+        "rtl/vpu/otpu_quant.sv": "47905e425f12561fe1152273801b8f09fa5ed5df24ed6abd39323e55b8d33ca8",
+        "rtl/vpu/otpu_se_comp.sv": "bebf297b001fea406fc3310e78fc245da27da3fdb698c622956b859d97631d9e",
+        "rtl/vpu/otpu_se_tail.sv": "a75187a35c6eee53cf4a49f0ccb58b205211506f360b9128ef5064580a0f387d",
+        "rtl/vpu/otpu_vpu.sv": "d696c0cfdc0ccf473248898181b91b2386d0f8d4405ba64b1ee839b112312d22",
+        "rtl/vpu/otpu_vtree.sv": "c9675b7d98f2d2a8ecaf36dc2ec12e6351ed4f313715ccf5f38dd04ad2af0d5b",
+        "targets/kv260.toml": "c7b0a447c3e87bc525a550575c21e75e14f89639328365fcfca7b22a943bb6f2"
+      }
+    },
+    {
+      "core_mhz": 250.0,
+      "build_id": "3a691612",
+      "patch": "250mhz-sources.patch",
+      "patch_sha256": "29a0f83eed5488069c2e76da26db137b897956469520463b5ed799f2d80ac6e7",
+      "parent_build_id": "d638198b",
+      "files_sha256_overrides": {
+        "rtl/dma/otpu_dma.sv": "655b1b6e0de390744d53814aa12679eb0a3f3111a0059683c9f8cd22b31a0059",
+        "rtl/mem/otpu_tmem.sv": "f04df3064d6dd48779311641e49485c06ff0b0b671c76ec7546c5229b8a20b2a",
+        "rtl/seq/otpu_seq.sv": "53a6d95f5916bbcd0a972e289899012510142313624ad52a5f9cb94d31d06242",
+        "rtl/top/otpu_coll.sv": "0d138c8dba41639a01dca0046967674ef2d2aa0e193d8345341b746c73f19fd9",
+        "rtl/top/otpu_slice.sv": "531459c278e10e8317ceab1d0a083e52739b55ca5689ae71388c06efb1980fee"
+      }
+    }
+  ]
+}
