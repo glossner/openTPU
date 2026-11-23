@@ -1,0 +1,343 @@
+{
+  "as_of_utc": "2026-11-23T11:08:51Z",
+  "source_revision": "d84db55712aba0d40811d7762cb052f05d55b7e5",
+  "tool": "Vivado 2026.1, build 6511674",
+  "part": "xck26-sfvc784-2LV-c",
+  "physical": [
+    {
+      "configuration": "225 MHz 2K board control",
+      "build_id": "d638198b",
+      "architecture": "e9ed9d11",
+      "mhz": 225.0,
+      "stage": "route",
+      "board_measured": true,
+      "setup": {
+        "worst_ns": 0.003,
+        "total_violation_ns": 0.0,
+        "failing_endpoints": 0,
+        "endpoints": 319154
+      },
+      "hold": {
+        "worst_ns": 0.0,
+        "total_violation_ns": 0.0,
+        "failing_endpoints": 0,
+        "endpoints": 319130
+      },
+      "pulse_width": {
+        "worst_ns": 0.722,
+        "total_violation_ns": 0.0,
+        "failing_endpoints": 0,
+        "endpoints": 102014
+      },
+      "utilization": {
+        "luts": 93385,
+        "flip_flops": 80119,
+        "occupied_clbs": 14590,
+        "bram36_tiles": 117.5,
+        "ultraram": 32,
+        "dsp48e2": 413
+      },
+      "report_sha256": {
+        "timing_route.rpt": "a253ad121c52679a8547dc89e242baa290c33eccccc0fd4490bb7fb0d4a831ca",
+        "utilization_route.rpt": "2e35edd855c781fcb4afb723dc0f41106261a82865a37677c3fa3efb92e04cc7",
+        "route_status.rpt": "4bf31778d4494b306fe7a90b217380594264d9a5115a13274f7de680573acab0"
+      },
+      "routing": {
+        "routable": 181604,
+        "fully_routed": 181604,
+        "errors": 0
+      }
+    },
+    {
+      "configuration": "250 MHz 2K best route",
+      "build_id": "3a691612",
+      "architecture": "e9ed9d11",
+      "mhz": 250.0,
+      "stage": "route",
+      "board_measured": false,
+      "setup": {
+        "worst_ns": -0.019,
+        "total_violation_ns": -6.873,
+        "failing_endpoints": 850,
+        "endpoints": 319704
+      },
+      "hold": {
+        "worst_ns": 0.007,
+        "total_violation_ns": 0.0,
+        "failing_endpoints": 0,
+        "endpoints": 319680
+      },
+      "pulse_width": {
+        "worst_ns": 0.5,
+        "total_violation_ns": 0.0,
+        "failing_endpoints": 0,
+        "endpoints": 102529
+      },
+      "utilization": {
+        "luts": 94552,
+        "flip_flops": 80758,
+        "occupied_clbs": 14587,
+        "bram36_tiles": 117.5,
+        "ultraram": 32,
+        "dsp48e2": 414
+      },
+      "report_sha256": {
+        "timing_route.rpt": "55aeff718ac5f80981df931b89a9eeaf15fbf0486ab3bc163fdd037211f0b35e",
+        "utilization_route.rpt": "f61395599962a892ef17a5429f1e0b327bae8d6be627e7e7d399578806ae9b07",
+        "route_status.rpt": "b497ebb28b53030a30d595fe70429820c076fb6b425319e27bcc52c08720a057"
+      },
+      "routing": {
+        "routable": 181700,
+        "fully_routed": 181700,
+        "errors": 0
+      }
+    },
+    {
+      "configuration": "300 MHz 1K clock diagnostic",
+      "build_id": "b5aae74d",
+      "architecture": "4951154e",
+      "mhz": 300.0,
+      "stage": "route",
+      "board_measured": false,
+      "setup": {
+        "worst_ns": -1.035,
+        "total_violation_ns": -24002.367,
+        "failing_endpoints": 60436,
+        "endpoints": 318917
+      },
+      "hold": {
+        "worst_ns": 0.006,
+        "total_violation_ns": 0.0,
+        "failing_endpoints": 0,
+        "endpoints": 318893
+      },
+      "pulse_width": {
+        "worst_ns": 0.167,
+        "total_violation_ns": 0.0,
+        "failing_endpoints": 0,
+        "endpoints": 101960
+      },
+      "utilization": {
+        "luts": 94837,
+        "flip_flops": 80065,
+        "occupied_clbs": 14610,
+        "bram36_tiles": 117.5,
+        "ultraram": 32,
+        "dsp48e2": 414
+      },
+      "report_sha256": {
+        "timing_route.rpt": "7f6dcc09102c7b864ba7260ffa050746947a49eeeb00904e4fc89157ff65e4a3",
+        "utilization_route.rpt": "3b1156e2bb6babc2f32b85f18da7048c4dbac6a6100de759c9bb7756792e16a3",
+        "route_status.rpt": "4be14592c8c5f240f745e05892cd3142c018432c10c5b75261a231e7bda5eac8"
+      },
+      "routing": {
+        "routable": 182360,
+        "fully_routed": 182360,
+        "errors": 0
+      }
+    },
+    {
+      "configuration": "250 MHz 2K paired DSP register trial",
+      "build_id": "a6b77d40",
+      "architecture": "e9ed9d11",
+      "mhz": 250.0,
+      "stage": "route",
+      "board_measured": false,
+      "setup": {
+        "worst_ns": -0.094,
+        "total_violation_ns": -37.357,
+        "failing_endpoints": 1101,
+        "endpoints": 329105
+      },
+      "hold": {
+        "worst_ns": 0.004,
+        "total_violation_ns": 0.0,
+        "failing_endpoints": 0,
+        "endpoints": 329081
+      },
+      "pulse_width": {
+        "worst_ns": 0.5,
+        "total_violation_ns": 0.0,
+        "failing_endpoints": 0,
+        "endpoints": 104323
+      },
+      "utilization": {
+        "luts": 93869,
+        "flip_flops": 82678,
+        "occupied_clbs": 14492,
+        "bram36_tiles": 117.5,
+        "ultraram": 32,
+        "dsp48e2": 417
+      },
+      "report_sha256": {
+        "timing_route.rpt": "3e0d4d36f1eb6ca74a7fb8d9dd9eadeb5c077538afa75c8980607ed82ead22ef",
+        "utilization_route.rpt": "759e2bca2677f7c61f099101e1f0df909aa9d6b9fb74595ce4b4466ee0ef72d3",
+        "route_status.rpt": "6daa90bdbc8ebf3d716ad330da437f6d22fe9e80847532c108c0203f1a6ace6c"
+      },
+      "routing": {
+        "routable": 184149,
+        "fully_routed": 184149,
+        "errors": 0
+      }
+    },
+    {
+      "configuration": "250 MHz 2K collective return",
+      "build_id": "21969753",
+      "architecture": "e9ed9d11",
+      "mhz": 250.0,
+      "stage": "place",
+      "board_measured": false,
+      "setup": {
+        "worst_ns": -0.047,
+        "total_violation_ns": -4.154,
+        "failing_endpoints": 220,
+        "endpoints": 332076
+      },
+      "hold": {
+        "worst_ns": -0.133,
+        "total_violation_ns": -29.555,
+        "failing_endpoints": 1037,
+        "endpoints": 332052
+      },
+      "pulse_width": {
+        "worst_ns": 0.5,
+        "total_violation_ns": 0.0,
+        "failing_endpoints": 0,
+        "endpoints": 105353
+      },
+      "utilization": {
+        "luts": 93948,
+        "flip_flops": 83725,
+        "occupied_clbs": 14546,
+        "bram36_tiles": 117.5,
+        "ultraram": 32,
+        "dsp48e2": 433
+      },
+      "report_sha256": {
+        "timing_place.rpt": "c3f66624a57073e4d7506710a559f525c79e873c070743f8ec1ab8bf55c53ec4",
+        "utilization_place.rpt": "0a3542c3c79214b0832b59f058abe0623c5b664f3503adf114449969b16af840"
+      }
+    }
+  ],
+  "benchmarks": {
+    "unit": "batch-one generated tokens per wall second after first token",
+    "columns": [
+      "OpenTPU Kintex",
+      "OpenTPU KV260 at 225 MHz",
+      "P-RISC P16 KV260",
+      "three FOUR12 processors at 500 MHz each"
+    ],
+    "rows": {
+      "SmolLM2-135M-Instruct, 64 tokens": [
+        null,
+        37.20233586107322,
+        null,
+        14.577321503894616
+      ],
+      "SmolLM2-135M-Instruct, 512 tokens": [
+        null,
+        32.67237002190035,
+        null,
+        12.028387626482855
+      ],
+      "SmolLM2-135M-Instruct, 2,048 tokens": [
+        null,
+        23.675720854718946,
+        null,
+        7.3784843552339625
+      ],
+      "LFM2.5-230M, W8, 512 tokens": [
+        52.25,
+        24.55504836627232,
+        null,
+        13.424475408250546
+      ],
+      "LFM2.5-230M, FP4 layers, 512 tokens": [
+        82.12,
+        34.74704975461392,
+        null,
+        null
+      ],
+      "Qwen3-0.6B, OpenTPU W8 / DSP W12, 512 tokens": [
+        21.33,
+        3.8006750277011965,
+        null,
+        1.98400265
+      ],
+      "Qwen3-0.6B, FP4 layers, 512 tokens": [
+        30.67,
+        5.493779767990401,
+        null,
+        null
+      ],
+      "Qwen3.5-0.8B, OpenTPU W8 / DSP W12, 512 tokens": [
+        16.31,
+        3.185073892687312,
+        null,
+        1.606625787
+      ],
+      "Qwen3.5-0.8B, FP4 layers, 512 tokens": [
+        23.27,
+        4.5085166842095985,
+        null,
+        null
+      ],
+      "SmolLM3-3B, W8, 512 tokens": [
+        4.99,
+        0.7749601801326826,
+        null,
+        null
+      ],
+      "SmolLM3-3B, OpenTPU FP4 layers / DSP S6 layers, 512 tokens": [
+        8.72,
+        1.3404321392654395,
+        null,
+        0.36479268750000005
+      ],
+      "Phi-4-mini, W8, 512 tokens": [
+        3.98,
+        0.021724545288542393,
+        null,
+        null
+      ],
+      "Phi-4-mini, OpenTPU FP4 layers / DSP S6 layers, 512 tokens": [
+        6.55,
+        1.0048215747578912,
+        null,
+        0.14351331
+      ],
+      "Gemma 4 E2B, OpenTPU FP4 layers / DSP S6 layers, W8 head, 512 tokens": [
+        10.53,
+        0.9228198428959209,
+        null,
+        0.47746325783559895
+      ],
+      "Gemma 4 E2B, FP4 layers and head, 512 tokens": [
+        12.09,
+        1.0479967528755638,
+        null,
+        null
+      ],
+      "Gemma 4 E4B, OpenTPU mixed/FP4 head, DSP S6/S8 head, 512 tokens": [
+        3.75,
+        0.023491809387983512,
+        null,
+        0.06700598090527417
+      ]
+    }
+  },
+  "board_clock": {
+    "build_id": "d638198b",
+    "median_hz": 225002599.1964183,
+    "clock_capture_sha256": "16f850a8e69870fca3b358c75b02a0eca7f4601cd210d519f6f3d63530d16ff1"
+  },
+  "qualified_225_bitstream_sha256": "27ba6be5aeaf046a8e1f09523de9711090440d11a7141f25ebe80ff29ae3f359",
+  "best_250_routed_checkpoint_sha256": "7e87c67d499245fc2148d1a460887cc4269ca03e3f866425f394dd1dcbd82b70",
+  "local_record_sha256": {
+    "board-comparison.json": "c86e860deb0d12c9d74f6c3ccdd199653e03fddaa6decc01d4202916cf1272cf",
+    "four-platform-decode.json": "156992c90fc991c6b5fc0920e55d80c4f6cf264d8aa95facc0ba791c2c4cdad6",
+    "prisc_board_inventory.json": "c7784b7699b994a1e0d07409fedc1e5147500f473ddd0a36a0f3c70d7e122124",
+    "physical-full.json": "1da71b52532de742e405d9a99be70b88f5855993563626c1699026d530d07bc4",
+    "physical-full-original.json": "1fd45e5c716e272beff7255c730e85ee245735b0c3c6d085d64530eabb5b709a"
+  }
+}

@@ -1,0 +1,505 @@
+diff --git a/rtl/dma/otpu_dma.sv b/rtl/dma/otpu_dma.sv
+index 47a334f176a667fea20ee0bed662933a3372c997..e209bfd081e3ff38002fe91e03fabf5de981fcfd 100644
+--- a/rtl/dma/otpu_dma.sv
++++ b/rtl/dma/otpu_dma.sv
+@@ -162,7 +162,8 @@ module otpu_dma
+   output logic                    asc_we,
+   output logic [7:0]              asc_row,
+   output logic [15:0]             asc_blk,
+-  output logic [63:0]             asc_data
++  output logic [63:0]             asc_data,
++  output logic                    t_ren_any   // one or more lanes occupy the shared TMEM port
+ );
+   localparam int CW  = D / 4;                         // words per chunk
+   localparam int W   = (CW < LANES) ? CW : LANES;     // words per segment
+@@ -1194,6 +1195,7 @@ module otpu_dma
+   // values, so no adv gate sits between the register and TMEM (the r2 slice OOC's worst clk ->
+   // clk2x path: pl -> adv -> the gate -> the TMEM's ranks -> a pumped bank's address, 12 levels)
+   logic [LANES-1:0]       t_ren_c, t_rv, t_re_q;
++  logic                   t_rv_any;
+   logic [LANES-1:0][31:0] t_raddr_c;
+   // st_pend, pl and oc_nf move in the ST branch of the process below (st_pend and pl with adv,
+   // occ with the push and the issue); a start clears st_pend; elsewhere st_pend is low, so adv
+@@ -1224,6 +1226,14 @@ module otpu_dma
+     end
+   assign t_ren = t_re_q;
+   assign t_rben = t_rb_q;
++  // Register the shared-port priority beside the individual lane enables. A held ST request
++  // resumes with precisely its saved lanes after downstream write backpressure clears.
++  always_ff @(posedge clk)
++    if (rst) begin t_rv_any <= 1'b0; t_ren_any <= 1'b0; end
++    else begin
++      if (adv) t_rv_any <= |t_ren_c;
++      t_ren_any <= adv_nx && (adv ? (|t_ren_c) : t_rv_any);
++    end
+ `ifndef SYNTHESIS
+   // the prediction is adv, and TMEM reads the pending request exactly while adv is up
+   logic adv_q;
+@@ -1232,6 +1242,8 @@ module otpu_dma
+   always @(posedge clk) begin
+     adv_q <= adv_nx;
+     if (rst) adv_rst <= 1'b1;
++    if (adv_rst && t_ren_any !== (|t_re_q))
++      $fatal(1, "otpu_dma: shared read indication %0b disagrees with lanes %b", t_ren_any, t_re_q);
+     if (!rst && adv_rst && (adv_q != adv || t_re_q != (adv ? t_rv : '0)))
+       $fatal(1, "otpu_dma: adv %0d predicted %0d, read %b of pending %b", adv, adv_q, t_re_q, t_rv);
+   end
+diff --git a/rtl/mem/otpu_tmem.sv b/rtl/mem/otpu_tmem.sv
+index fd610e38cef739ac919c75b8fe6f68d974dfff85..9b254d239d87800cc7471bbf16a1a14961d1687f 100644
+--- a/rtl/mem/otpu_tmem.sv
++++ b/rtl/mem/otpu_tmem.sv
+@@ -79,9 +79,10 @@ module otpu_tmem #(
+   parameter int   PMP   = 0,              // TDP: 1 the RAMs pumped at 2x on clk_f (otpu_pump_bank), 2
+                                           //   its model at the core clock (see IMPL 3)
+   parameter bit   IQ    = 1'b0,           // the input stage: the granted writes registered (below)
+-  parameter string STYLE = "block"        // the pumped RAMs' (PMP 1: otpu_pump_bank STYLE; "ultra":
++  parameter string STYLE = "block",       // the pumped RAMs' (PMP 1: otpu_pump_bank STYLE; "ultra":
+                                           //   UltraRAM, the WG targets': its block RAM is the board's; the
+                                           //   other configurations' RAMs are block RAM)
++  parameter bit HOST_REQ_ANY = 1'b0       // the host supplies a registered lane reduction
+ ) (
+   input  logic                                clk,
+   input  logic                                clk_f,    // PMP 1: 2 x clk, aligned (else unused)
+@@ -102,8 +103,10 @@ module otpu_tmem #(
+   output logic [NRP-1:0]                      lost,     // IMPL 3 RPL: the port's read this cycle
+                                                         //   lost a RAM (replayed next cycle)
+   output logic [NRP-1:0]                      frz,      // IMPL 3 RPL: the port replays now
+-  input  logic                                dump
++  input  logic                                dump,
++  input  logic                                r_host_any
+ );
++  wire host_requested = HOST_REQ_ANY ? r_host_any : (|r_req[SH_HOST]);
+   localparam int BW = $clog2(LANES);
+   localparam int BD = WORDS / LANES;        // words per bank
+   localparam int IW = $clog2(BD);
+@@ -522,16 +525,35 @@ module otpu_tmem #(
+     always_comb begin
+       logic take;
+       qe = pb_en; qa = pb_a;
+-      take = |r_req[SH_HOST];
++      take = host_requested;
+       if (GST)
+         for (int g = 0; g < NRP; g++)
+           if (SH_MASK[g]) begin
+-            if (!take && |r_req[g]) begin
++            // The last guest supplies the idle bank-enable mask as well. When
++            // it has no request, all its banks are off and no address is used.
++            // Earlier guests retain priority only on a real request.
++            if (!take && (((SH_MASK >> (g + 1)) == '0) || (|r_req[g]))) begin
+               qe[SH_HOST] = pb_en[g]; qa[SH_HOST] = pb_a[g]; take = 1'b1;
+             end
+             qe[g] = '0;
+           end
+     end
++`ifndef SYNTHESIS
++    if (GST) begin : g_guest_check
++      always @(posedge clk) if (chk) begin
++        int selected;
++        selected = SH_HOST;
++        if (!host_requested)
++          for (int g = NRP - 1; g >= 0; g--)
++            if (SH_MASK[g] && (|r_req[g])) selected = g;
++        if (qe[SH_HOST] !== pb_en[selected])
++          $fatal(1, "TMEM%0d: shared bank enables differ from guest priority", SID);
++        for (int b = 0; b < LANES; b++)
++          if (qe[SH_HOST][b] && qa[SH_HOST][b] !== pb_a[selected][b])
++            $fatal(1, "TMEM%0d: shared bank %0d reads the wrong guest row", SID, b);
++      end
++    end
++`endif
+     // each asker's banks, bank rows, sub-banks and RAM rows
+     logic [NRP-1:0][LANES-1:0]          ae;
+     logic [NRP-1:0][LANES-1:0][IW-1:0]  aa;
+@@ -869,8 +891,9 @@ module otpu_tmem #(
+             if (s_en[b][k][0]) s_q[b][k][0] <= mem[s_a[b][k][0]];
+ `endif
+         end else begin : g_sdp
++          wire [RW-1:0] write_row = ram_row(pw_a[b][0]);
+           always_ff @(posedge clk) begin
+-            if (wh) mem[ram_row(pw_a[b][0])] <= wd;
++            if (wh) mem[write_row] <= wd;
+             if (s_en[b][k][0]) s_q[b][k][0] <= mem[s_a[b][k][0]];
+           end
+         end
+@@ -980,7 +1003,7 @@ module otpu_tmem #(
+       always_comb begin
+         logic take;
+         b_en = pb_en[p]; b_a = pb_a[p];
+-        take = |r_req[p];
++        take = host_requested;
+         for (int g = 0; g < NRP; g++)
+           if (SH_MASK[g] && !take && |r_req[g]) begin
+             b_en = pb_en[g]; b_a = pb_a[g]; take = 1'b1;
+diff --git a/rtl/seq/otpu_seq.sv b/rtl/seq/otpu_seq.sv
+index cf26a0b68dd40a5218eb7e1cbd532d755fce1d1d..bbe09eb82c9ca6fb3f524c5b1c2216a7d3164867 100644
+--- a/rtl/seq/otpu_seq.sv
++++ b/rtl/seq/otpu_seq.sv
+@@ -172,15 +172,20 @@ module otpu_seq
+   logic        rl_wait;          // an RLD is out: R holds until its value is back
+   logic [3:0]  rl_rd;
+ 
+-  // loop stack
+-  logic [2:0]  sp;
+-  logic [31:0] stk_start [4];
+-  logic [31:0] stk_end   [4];
+-  logic [31:0] stk_rem   [4];
+-  // LOOP takes two cycles: the first registers the trip count and body length (pc holds), the
+-  // second enters or skips the loop from registers -- keeps the add off the fetch-address path
++  // Entry zero is the active loop and entry one its parent. Fetch reads both
++  // without addressing a stack RAM. Only a push or pop moves other entries.
++  logic [2:0] sp;
++  typedef struct packed {
++    logic [31:0] start_pc, end_pc, remaining;
++    logic        repeats, repeats_after_one;
++  } loop_entry_t;
++  loop_entry_t loop_stack [4];
++  // Fetch the loop body while the count is formed. An uncached zero-trip loop needs one
++  // correction cycle to fetch the skip instruction and its matching WAIT entry.
+   logic        lp;
+   logic [31:0] lp_cnt, lp_len;
++  logic        lp_redirect;
++  logic [31:0] lp_skip_pc;
+ 
+   // The footprint as the window keeps it: ranges stored by space, so ranges in different
+   // spaces, and two reads, are never compared. No valid bits: an invalid range has hi = 0,
+@@ -825,19 +830,33 @@ module otpu_seq
+ 
+   // ---- loop-end handling for the instruction at pc
+   logic        at_end;
+-  always_comb at_end = (sp != 0) && (stk_end[sp-1] == pc);
++  always_comb at_end = (sp != 0) && (loop_stack[0].end_pc == pc);
++`ifndef SYNTHESIS
++  always @(posedge clk) if (!rst && ir_v)
++    for (int i = 0; i < 4; i++)
++      if (i < int'(sp) && (loop_stack[i].repeats !== (loop_stack[i].remaining > 1)
++                         || loop_stack[i].repeats_after_one !== (loop_stack[i].remaining > 2)))
++        $fatal(1, "otpu_seq: repeat flags disagree with loop depth %0d", i);
++`endif
+ 
+   task automatic advance();
+     if (at_end) begin
+-      if (stk_rem[sp-1] > 1) stk_rem[sp-1] <= stk_rem[sp-1] - 1;
+-      else sp <= sp - 1;
++      if (loop_stack[0].repeats) begin
++        loop_stack[0].remaining <= loop_stack[0].remaining - 1;
++        loop_stack[0].repeats <= loop_stack[0].repeats_after_one;
++        loop_stack[0].repeats_after_one <= loop_stack[0].remaining > 3;
++      end else begin
++        for (int i = 0; i < 3; i++) loop_stack[i] <= loop_stack[i + 1];
++        loop_stack[3] <= loop_stack[0];
++        sp <= sp - 1;
++      end
+     end
+   endtask
+ 
+   always_comb
+     r_ret = ir_v && !stopping && !halted && !rl_wait &&
+             (op == OP_NOP || op == OP_HALT || op == OP_LI || op == OP_ADDI ||
+-             (op == OP_LOOP && lp));
++             (op == OP_LOOP && lp && !lp_redirect));
+ 
+   // ---- the next fetch address (mirrors the fetch/dispatch below). fa is the successor of pc
+   // under the loop stack as it stands while R holds pc; when R moves on, fa_d is the successor
+@@ -857,23 +876,23 @@ module otpu_seq
+     case (op)
+       OP_NOP, OP_LI, OP_ADDI: adv = 1'b1;
+       OP_HALT: adv = 1'b0;
+-      OP_LOOP: adv = lp;
++      OP_LOOP: adv = lp && !lp_redirect;
+       default: adv = dunit >= 0 && r_take;
+     endcase
+     ld = ic_ok && (!ir_v || (!stopping && !halted && !rl_wait && adv));
+-    hit1 = (sp != 0) && (stk_end[sp-1] == fa);
+-    hit2 = (sp >= 2) && (stk_end[sp-2] == fa);
+-    hit = hit1 && stk_rem[sp-1] > 1;                                          // D
+-    hit_pc = stk_start[sp-1];
++    hit1 = (sp != 0) && (loop_stack[0].end_pc == fa);
++    hit2 = (sp >= 2) && (loop_stack[1].end_pc == fa);
++    hit = hit1 && loop_stack[0].repeats;                                          // D
++    hit_pc = loop_stack[0].start_pc;
+     ic_hp = ic_ps1;
+     if (ir_v && op == OP_LOOP) begin
+       if (lp_cnt != 0) begin
+         hit = lp_len == 1 && lp_cnt > 1; hit_pc = fa; ic_hp = ic_pfa;                // A
+       end
+     end else if (ir_v && at_end) begin
+-      if (stk_rem[sp-1] > 1) hit = hit1 && stk_rem[sp-1] > 2;                // B
++      if (loop_stack[0].repeats) hit = hit1 && loop_stack[0].repeats_after_one;                // B
+       else begin
+-        hit = hit2 && stk_rem[sp-2] > 1; hit_pc = stk_start[sp-2]; ic_hp = ic_ps2;   // C
++        hit = hit2 && loop_stack[1].repeats; hit_pc = loop_stack[1].start_pc; ic_hp = ic_ps2;   // C
+       end
+     end
+     succ = hit ? hit_pc : fa + 1;
+@@ -883,14 +902,17 @@ module otpu_seq
+     // ICACHE: ic_pn, fa_n's line there, as fa_n is chosen; ic_rf reads fa's row again
+     if (rst) begin
+       fa_n = '0; ic_pn = 1'b0;
++    end else if (lp_redirect) begin
++      fa_n = lp_skip_pc; ic_pn = 1'b0;
+     end else if (ir_v && op == OP_LOOP && !lp) begin
+-      fa_n = lp_z ? pc + 1 + iw[1] : pc + 1; ic_pn = lp_z ? ic_plz : ic_ple;
++      fa_n = ICACHE && lp_z ? pc + 1 + iw[1] : pc + 1;
++      ic_pn = lp_z ? ic_plz : ic_ple;
+     end else if (ic_rf) begin
+       fa_n = fa; ic_pn = ic_pfa;
+     end else begin
+       fa_n = succ; ic_pn = hit ? ic_hp : ic_pfa1;
+     end
+-    fe = rst || (ir_v && op == OP_LOOP && !lp && !stopping && !halted && !rl_wait) || ld || ic_rf;
++    fe = rst || lp_redirect || (ir_v && op == OP_LOOP && !lp && !stopping && !halted && !rl_wait) || ld || ic_rf;
+     fa_d = fe ? fa_n : fa;
+   end
+ 
+@@ -926,8 +948,8 @@ module otpu_seq
+       lfa = lof(fa);
+       ic_pfa  = (fa >> PCW) == 0 && has(lfa, tg, vl);
+       ic_pfa1 = (fa[4:0] != 5'd31) ? ic_pfa : (fa + 1) >> PCW == 0 && has(lfa + 1'b1, tg, vl);
+-      ic_ps1  = has(lof(stk_start[sp - 1]), tg, vl);
+-      ic_ps2  = has(lof(stk_start[sp - 2]), tg, vl);
++      ic_ps1  = has(lof(loop_stack[0].start_pc), tg, vl);
++      ic_ps2  = has(lof(loop_stack[1].start_pc), tg, vl);
+       ic_plz  = has(lof(pc + 1 + iw[1]), tg, vl);
+       ic_ple  = has(lof(pc + 1), tg, vl);
+     end
+@@ -1006,10 +1028,10 @@ module otpu_seq
+         w_go <= 1'b1; w_v <= 1'b1; w_cv <= 1'b0; w_l0 <= lfa; w_pos <= (PCW+1)'(fa);
+         w_n <= '0; w_k <= '0;
+         w_lv <= (sp >= 2) ? 2'd2 : 2'(sp);
+-        w_s[0] <= (PCW+1)'(stk_start[sp - 1]); w_e[0] <= (PCW+1)'(stk_end[sp - 1]);
+-        w_r[0] <= sat15(stk_rem[sp - 1]);
+-        w_s[1] <= (PCW+1)'(stk_start[sp - 2]); w_e[1] <= (PCW+1)'(stk_end[sp - 2]);
+-        w_r[1] <= sat15(stk_rem[sp - 2]);
++        w_s[0] <= (PCW+1)'(loop_stack[0].start_pc); w_e[0] <= (PCW+1)'(loop_stack[0].end_pc);
++        w_r[0] <= sat15(loop_stack[0].remaining);
++        w_s[1] <= (PCW+1)'(loop_stack[1].start_pc); w_e[1] <= (PCW+1)'(loop_stack[1].end_pc);
++        w_r[1] <= sat15(loop_stack[1].remaining);
+       end else if (!w_cv) begin
+         w_cv <= 1'b1; w_cnp <= w_np; w_cl <= w_l; w_cwrap <= w_wrap; w_cpop <= w_pop;
+         w_cend <= w_end;
+@@ -1257,7 +1279,28 @@ module otpu_seq
+     logic [$bits(cmd_t)-1:0] q;
+     logic          we;
+     logic [SW-1:0] wa;
++    logic [SW-1:0] read_slot;
+     wire q_en = urdy[u] && !ustart[u];
++    if (WAITC && u != U_VPU && SW <= CW && WIN == (1 << SW)) begin : g_inorder_read
++      // These units start in dispatch order. wd_n counts dispatches and uq_t
++      // counts starts, so the next command's slot can be read ahead while the
++      // existing age and WAIT logic decides whether that command may start.
++      (* ram_style = "distributed" *) logic [SW-1:0] slots [WIN];
++      always_ff @(posedge clk) begin
++        if (!rst && c_go && c_unit == 3'(u)) slots[SW'(wd_n[u])] <= free_slot;
++        read_slot <= slots[SW'(uq_t[u])];
++      end
++      // A newly dispatched command's payload is written the following cycle.
++      // After a start, ustart prevents a second start for one cycle. Both
++      // intervals give the registered slot time to reach the command RAM.
++`ifndef SYNTHESIS
++      always @(posedge clk)
++        if (!rst && can_start[u] && read_slot !== start_slot[u])
++          $fatal(1, "otpu_seq: unit %0d prefetched slot %0d, expected %0d", u, read_slot, start_slot[u]);
++`endif
++    end else begin : g_selected_read
++      assign read_slot = start_slot[u];
++    end
+     if (WAITC) begin : g_wq
+       (* keep_hierarchy = "yes" *)
+       otpu_delay #(.W(1 + SW), .N(1)) u_w (.clk, .en(1'b1), .d({!rst && c_go, free_slot}),
+@@ -1267,7 +1310,7 @@ module otpu_seq
+       assign wa = free_slot;
+     end
+     always_ff @(posedge clk) if (we) m[wa] <= WAITC ? c_cmd_w : c_cmd;
+-    always_ff @(posedge clk) if (!rst && q_en) q <= m[start_slot[u]];
++    always_ff @(posedge clk) if (!rst && q_en) q <= m[read_slot];
+     assign ucmd[u] = hmask(cmd_t'(q));
+ `ifndef SYNTHESIS
+     // the copy is the started slot's command when the unit reads it (at ustart; the collective
+@@ -1407,6 +1450,7 @@ module otpu_seq
+       halted <= 1'b0; error <= 1'b0; stopping <= 1'b0;
+       rl_wait <= 1'b0; ch_req <= 1'b0;
+       p_v <= 1'b0; s_v <= 1'b0; q_v <= 1'b0; c_v <= 1'b0; lp <= 1'b0;
++      lp_redirect <= 1'b0;
+       icount <= '0;
+       sv <= '0; sstarted <= '0; sready <= '0;
+       for (int i = 0; i < 8; i++) R[i] <= '0;
+@@ -1428,7 +1472,7 @@ module otpu_seq
+       // fa is the pc the one-instruction-per-cycle fetch would move to (the next_pc rule)
+       if (ld && ir_v &&
+           fa != ((op == OP_LOOP) ? ((lp_cnt == 0) ? pc + 1 + lp_len : pc + 1) :
+-                 (at_end && stk_rem[sp-1] > 1) ? stk_start[sp-1] : pc + 1))
++                 (at_end && loop_stack[0].repeats) ? loop_stack[0].start_pc : pc + 1))
+         $fatal(1, "otpu_seq: fetch address %0d does not follow pc %0d", fa, pc);
+       // the segregated footprints give exactly otpu_pkg's conflict() and conflict_dram(); a
+       // footprint whose TMEM ranges overflowed rt_t (all raised by fp_seg) conflicts with all.
+@@ -1679,12 +1723,21 @@ module otpu_seq
+               lp <= 1'b1;
+               lp_cnt <= rv32(ra) + iw[2];
+               lp_len <= iw[1];
++              lp_redirect <= !ICACHE && lp_z;
++              lp_skip_pc <= pc + 1 + iw[1];
++            end else if (lp_redirect) begin
++              // ir and pc still name the LOOP. Neither the predicted instruction nor its
++              // sidecar can issue. The following edge now consumes the corrected RAM row.
++              lp_redirect <= 1'b0;
+             end else begin
+               lp <= 1'b0;
+-                if (lp_cnt != 0) begin
+-                stk_start[sp] <= pc + 1;
+-                stk_end[sp]   <= pc + lp_len;
+-                stk_rem[sp]   <= lp_cnt;
++              if (lp_cnt != 0) begin
++                for (int i = 1; i < 4; i++) loop_stack[i] <= loop_stack[i - 1];
++                loop_stack[0].start_pc <= pc + 1;
++                loop_stack[0].end_pc <= pc + lp_len;
++                loop_stack[0].remaining <= lp_cnt;
++                loop_stack[0].repeats <= lp_cnt > 1;
++                loop_stack[0].repeats_after_one <= lp_cnt > 2;
+                 sp <= sp + 1;
+               end
+             end
+diff --git a/rtl/top/otpu_coll.sv b/rtl/top/otpu_coll.sv
+index 2b8e53df987ad8fcfcc0037ea62da41811655253..c7be5937a19f4d5572795314086bcc6b9563fbc4 100644
+--- a/rtl/top/otpu_coll.sv
++++ b/rtl/top/otpu_coll.sv
+@@ -67,16 +67,49 @@ module otpu_coll
+   logic [LANES-1:0][31:0] aal;
+   logic [31:0]            as_, ar, acl, awa;
+ 
++  // The direct one-slice port has no inter-slice address merge. Form its qualified lane
++  // mask and addresses on the input of stage a, before the shared tensor RAM arbitration.
++  logic [LANES-1:0]       direct_en;
++  logic [LANES-1:0][31:0] direct_addr;
++  if (S == 1 && RQ) begin : g_direct_read
++    always_ff @(posedge clk) begin
++      if (rst || st == C_IDLE) begin
++        direct_en <= '0;
++        direct_addr <= '0;
++      end else if (st == C_RUN && gnt) begin
++        for (int l = 0; l < LANES; l++) begin
++          direct_en[l] <= issuing && ssel[0] && rm[l];
++          direct_addr[l] <= (issuing && ssel[0] && rm[l]) ? ra + 32'(l) : '0;
++        end
++      end
++    end
++`ifndef SYNTHESIS
++    bit initialized;
++    always @(posedge clk) begin
++      if (rst) initialized <= 1'b1;
++      if (initialized && !rst)
++        for (int l = 0; l < LANES; l++)
++          if (direct_en[l] !== (av && asel[0] && am[l]) ||
++              direct_addr[l] !== ((av && asel[0] && am[l]) ? aal[l] : 32'd0))
++            $fatal(1, "otpu_coll: direct read lane %0d differs from stage a", l);
++    end
++`endif
++  end
++
+   always_comb begin
+     ack = (st == C_ACK);
+     r_en = '0; r_addr = '0;
+     w_en = '0; w_addr = '0; w_data = '0;
+-    for (int k = 0; k < S; k++)
+-      for (int l = 0; l < LANES; l++)
+-        if (RQ ? av && asel[k] && am[l] : rd_on && ssel[k] && rm[l]) begin
+-          r_en[k][l] = 1'b1;
+-          r_addr[k][l] = RQ ? aal[l] : ra + 32'(l);
+-        end
++    if (S == 1 && RQ) begin
++      r_en[0] = direct_en;
++      r_addr[0] = direct_addr;
++    end else
++      for (int k = 0; k < S; k++)
++        for (int l = 0; l < LANES; l++)
++          if (RQ ? av && asel[k] && am[l] : rd_on && ssel[k] && rm[l]) begin
++            r_en[k][l] = 1'b1;
++            r_addr[k][l] = RQ ? aal[l] : ra + 32'(l);
++          end
+     if (st == C_RUN && qv) begin
+       for (int l = 0; l < LANES; l++)
+         if (qm[l]) begin
+diff --git a/rtl/top/otpu_slice.sv b/rtl/top/otpu_slice.sv
+index a901e8f2e133e8bd559818503492bc8d96ee1f45..a7bf0097ca25603057b58d80400f1faaac737192 100644
+--- a/rtl/top/otpu_slice.sv
++++ b/rtl/top/otpu_slice.sv
+@@ -511,6 +511,7 @@ module otpu_slice
+   logic [NRP-1:0]                  tm_bx, tm_bs, tm_sv, tm_pre;   // TMEM_IMPL 3 (below)
+   logic [NRP-1:0]                  tm_lost, tm_frz;               // TMEM_IMPL 3, TMEM_RPL
+   logic [NRP-1:0][LANES-1:0]       rq_t;
++  logic                            dma_ren_any, dma_tmem_any;
+   logic [NRP-1:0][LANES-1:0][31:0] r_addr, r_data;
+   // the units' reads by bank (otpu_tmem PBR, from their flip-flops: the MXU's under MXU_TQ, the
+   // DMA's, the quantizer's and the VPU's with the one TMEM copy), the banks held as rq_t is
+@@ -552,7 +553,7 @@ module otpu_slice
+   otpu_tmem #(.WORDS(TMEM_WORDS), .LANES(LANES), .NRP(NRP), .NWP(NWP), .WPB(WPB),
+               .GEN_R(NRP'(1) << P_MXU), .GEN_W((WG > 1) ? NWP'(0) : NWP'(1) << W_MXU),
+               .PBR(PBR),
+-              .SH_HOST(P_DMA),
++              .SH_HOST(P_DMA), .HOST_REQ_ANY(1'b1),
+               .SH_MASK((TMEM_IMPL == 2) ? '0 : (NRP'(1) << P_Q3) | (NRP'(1) << P_COLL)),
+               .SID(SID), .IMPL((TMEM_IMPL == 2) ? 0 : TMEM_IMPL), .NCP(NCP), .CPY(CPY), .RQ(TMEM_RQ),
+               .PRANK((TMEM_IMPL == 3) ? PRANK3 : PRANK), .NSB(TMEM_NSB), .SBP(TMEM_SBP),
+@@ -561,7 +562,7 @@ module otpu_slice
+               .PMP(TMEM_PMP), .IQ(1'b1), .STYLE(TMEM_STYLE)) u_tmem (
+     .clk, .clk_f, .rst(rst_mem), .r_en, .r_req(rq_t), .r_addr, .r_ben, .r_bad, .r_data, .w_en,
+     .w_req(wq_en), .w_gnt, .w_addr, .w_data, .blk_x(tm_bx), .blk_s(tm_bs), .lost(tm_lost),
+-    .frz(tm_frz), .dump);
++    .frz(tm_frz), .dump, .r_host_any(dma_tmem_any));
+   assign coll_rdata = r_data[P_COLL];
+   // the units' TMEM requests
+   logic [LANES-1:0]        dma_ren, dma_wen, va_ren, vb_ren, v_wen;
+@@ -702,7 +703,7 @@ module otpu_slice
+     .b_req(dma_breq), .b_gnt(b_rdy_i && !ic_req), .b_we(dma_bwe), .b_wmask(dma_bwmask),
+     .b_wdata(dma_bwdata), .b_addr(dma_baddr), .b_rvalid(b_rvalid_i && b_rtag_i && !ic_rv_i),
+     .b_rdata(b_rdata_i), .wr_idle(wr_idle_i),
+-    .t_ren(dma_ren), .t_raddr(dma_raddr), .t_rben(rq_b[P_DMA]), .t_rbad(r_bad[P_DMA]),
++    .t_ren(dma_ren), .t_ren_any(dma_ren_any), .t_raddr(dma_raddr), .t_rben(rq_b[P_DMA]), .t_rbad(r_bad[P_DMA]),
+     .t_rdata(r_data[P_DMA]),
+     .t_wen(dma_wen), .t_waddr(dma_waddr), .t_wdata(dma_wdata),
+     .ss_req, .ss_gnt, .ss_cfg, .ss_pe, .ss_in_v, .ss_in_d, .ss_fk, .ss_fi, .ss_fd,
+@@ -926,8 +927,9 @@ module otpu_slice
+   // requests: the copy's block RAM address does not wait for the grants)
+   // (TMEM_IMPL 1: no guests, the banked arbiter counts every copy's banks)
+   localparam bit GUESTS = TMEM_IMPL == 0 || (TMEM_IMPL == 3 && TMEM_GST);
+-  wire q3_blk = GUESTS && (|rq_en[P_Q3]) && (|rq_en[P_DMA]);
+-  wire coll_blk = GUESTS && (|rq_en[P_COLL]) && ((|rq_en[P_DMA]) || (|rq_en[P_Q3]));
++  wire q3_blk = GUESTS && (|rq_en[P_Q3]) && dma_ren_any;
++  wire coll_port_busy = GUESTS && (dma_ren_any || (|rq_en[P_Q3]));
++  wire coll_blk = coll_port_busy && (|rq_en[P_COLL]);
+   // TMEM_RPL: a group whose port replays a lost read is held (tm_frz, a register); the
+   // collective, which is not replayed, reads only where its request does not lose (tm_bx)
+   logic [NG-1:0] rpl_hold, rpl_frz;
+@@ -999,11 +1001,15 @@ module otpu_slice
+     if (TMEM_IMPL == 3 && TMEM_RPL)
+       for (int g = 0; g < NG; g++)
+         if ((g == G_VPU) ? !v_ren : rpl_frz[g]) off = off | grp_rports(g);
+-    if (TMEM_IMPL == 3 && TMEM_RPL && coll_blk) off[P_COLL] = 1'b1;
++    // A busy shared port suppresses every collective read lane. An idle
++    // collective already requests zero. Its own lane reduction belongs only
++    // on the grant decision, where a write-only collective can still advance.
++    if (TMEM_IMPL == 3 && TMEM_RPL && coll_port_busy) off[P_COLL] = 1'b1;
+     for (int p = 0; p < NRP; p++)
+       rq_t[p] = ((TMEM_IMPL == 3 && !TMEM_RPL && tm_sv[p]) || off[p]) ? '0 : rq_en[p];
+     for (int p = 0; p < NRP; p++)
+       r_ben[p] = ((TMEM_IMPL == 3 && !TMEM_RPL && tm_sv[p]) || off[p]) ? '0 : rq_b[p];
++    dma_tmem_any = dma_ren_any && !((TMEM_IMPL == 3 && !TMEM_RPL && tm_sv[P_DMA]) || off[P_DMA]);
+   end
+   logic [NG-1:0] gs3;
+   always_comb begin
+@@ -1016,6 +1022,7 @@ module otpu_slice
+     logic           rd_ok, self;
+     tm_pre = '0;
+     for (int p = 0; p < NRP; p++) ask[p] = |rq_t[p];
++    ask[P_DMA] = dma_tmem_any;
+     for (int g = 0; g < NG; g++) begin
+       rp = grp_rports(g);
+       rd_ok = (tm_bx & rp & ask) == '0;
+@@ -1376,7 +1383,7 @@ module otpu_slice
+       int n, dm, dwm, c;
+       logic [LANES-1:0] wb;
+       logic hit;
+-      n = int'(|rq_en[P_MXU]) + int'((|rq_en[P_DMA]) || (|rq_en[P_Q3]) || (|rq_en[P_COLL])) +
++      n = int'(|rq_en[P_MXU]) + int'(dma_ren_any || (|rq_en[P_Q3]) || (|rq_en[P_COLL])) +
+           int'(|rq_en[P_Q]) + int'(|rq_en[P_VA]) + int'(|rq_en[P_VB]) + int'(|rq_en[P_Q2]);
+       wb = '0;
+       for (int p = 0; p < NWP; p++)

@@ -1,0 +1,897 @@
+diff --git a/boards/kv260/build.py b/boards/kv260/build.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..b06ffbfa8d639f7d25e8185759ebe2e1c76bb9bf
+--- /dev/null
++++ b/boards/kv260/build.py
+@@ -0,0 +1,91 @@
++#!/usr/bin/env python3
++"""Capture inputs and build a KV260 bitstream. Never opens a hardware server."""
++from __future__ import annotations
++
++import argparse
++import datetime as dt
++import hashlib
++import json
++import os
++from pathlib import Path
++import shutil
++import subprocess
++import sys
++
++ROOT = Path(__file__).resolve().parents[2]
++sys.path.insert(0, str(ROOT))
++from opentpu import target as T
++
++
++def main():
++    p = argparse.ArgumentParser(description=__doc__)
++    p.add_argument("--mhz", type=float, default=200)
++    p.add_argument("--out", type=Path)
++    p.add_argument("--stage", choices=("full", "synth"), default="full")
++    p.add_argument("--reference-dcp", type=Path,
++                   help="routed checkpoint used only as an incremental placement/routing reference")
++    a = p.parse_args()
++    if not 50 <= a.mhz <= 500:
++        p.error("--mhz must be between 50 and 500")
++    reference = a.reference_dcp.resolve() if a.reference_dcp else None
++    if reference and (not reference.is_file() or reference.suffix != ".dcp"):
++        p.error("--reference-dcp must name an existing routed .dcp file")
++    vivado = (os.environ.get("VIVADO_BIN") or shutil.which("vivado")
++              or "/home/jglossner/Xilinx/2026.1/Vivado/bin/vivado")
++    if not Path(vivado).is_file():
++        p.error("Vivado unavailable; set VIVADO_BIN")
++    stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
++    cache = ROOT / ".tmp/kv260/vendor-ip-cache"
++    cache.mkdir(parents=True, exist_ok=True)
++    out = (a.out or ROOT / ".tmp/kv260" / f"{stamp}-{a.mhz:g}mhz").resolve()
++    out.mkdir(parents=True, exist_ok=False)
++    snap = out / "inputs"
++    t = T.load("kv260")
++    rels = [f"rtl/{f}" for f in T.sources(t)] + [
++        "targets/kv260.toml", "boards/kv260/build.py", "boards/kv260/vivado/build.tcl",
++        "boards/kv260/constraints/kv260.xdc", "opentpu/target.py"]
++    hashes = {}
++    for rel in rels:
++        dst = snap / rel
++        dst.parent.mkdir(parents=True, exist_ok=True)
++        shutil.copyfile(ROOT / rel, dst)
++        hashes[rel] = hashlib.sha256(dst.read_bytes()).hexdigest()
++    head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
++    build_id = hashlib.sha256(json.dumps(dict(files=hashes, core_mhz=a.mhz, target="kv260"),
++                                        sort_keys=True).encode()).hexdigest()[:8]
++    manifest = dict(created_utc=stamp, git_head=head, mhz=a.mhz, stage=a.stage,
++                    target="kv260", arch_hash=f"{T.arch_hash(T.config(t)):08x}",
++                    build_id=build_id, files=hashes, load_requested=False,
++                    vendor_ip_cache=str(cache))
++    if reference:
++        captured_reference = snap / "implementation_reference.dcp"
++        shutil.copyfile(reference, captured_reference)
++        manifest["incremental_reference"] = dict(
++            original_path=str(reference), captured_path="inputs/implementation_reference.dcp",
++            sha256=hashlib.sha256(captured_reference.read_bytes()).hexdigest())
++    # A source file per line, paths relative to the immutable input root.
++    (out / "sources.txt").write_text("".join(f"rtl/{f}\n" for f in T.sources(t)))
++    (out / "config.tcl").write_text(
++        f"set core_mhz {a.mhz}\nset build_id 0x{build_id}\n"
++        f"set arch_hash 0x{T.arch_hash(T.config(t)):08x}\nset build_stage {a.stage}\n"
++        f"set incremental_reference {int(reference is not None)}\n")
++    manifest["config_sha256"] = hashlib.sha256((out / "config.tcl").read_bytes()).hexdigest()
++    (out / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
++    env = dict(os.environ, TMPDIR=str(out / "tmp"), OTPU_KV260_IP_CACHE=str(cache))
++    (out / "tmp").mkdir()
++    cmd = [vivado, "-mode", "batch", "-nojournal", "-log", str(out / "vivado.log"),
++           "-source", str(snap / "boards/kv260/vivado/build.tcl"), "-tclargs", str(out)]
++    print(f"KV260_BUILD={out}", flush=True)
++    with (out / "console.log").open("w") as log:
++        proc = subprocess.Popen(cmd, cwd=out, env=env, stdout=log, stderr=subprocess.STDOUT)
++        (out / "process.json").write_text(json.dumps(dict(pid=proc.pid, command=cmd), indent=2))
++        rc = proc.wait()
++        # Preserve the real exit before interpreting reports or success markers.
++        (out / "exit.json").write_text(json.dumps(dict(returncode=rc,
++            finished_utc=dt.datetime.now(dt.timezone.utc).isoformat()), indent=2) + "\n")
++    print(f"VIVADO_EXIT={rc} KV260_BUILD={out}", flush=True)
++    return rc if rc else (0 if (out / ("PASS" if a.stage == "full" else "SYNTH_PASS")).exists() else 1)
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+diff --git a/boards/kv260/constraints/kv260.xdc b/boards/kv260/constraints/kv260.xdc
+new file mode 100644
+index 0000000000000000000000000000000000000000..05fb7eee357e3a375fae2614bf0f18af5ae3aaf9
+--- /dev/null
++++ b/boards/kv260/constraints/kv260.xdc
+@@ -0,0 +1,7 @@
++# KV260 carrier fan: AMD kria-vitis-platforms kv260_bist/xdc/pin.xdc.
++set_property PACKAGE_PIN A12 [get_ports fan_en_b]
++set_property IOSTANDARD LVCMOS33 [get_ports fan_en_b]
++set_property SLEW SLOW [get_ports fan_en_b]
++set_property DRIVE 4 [get_ports fan_en_b]
++set_property BITSTREAM.CONFIG.OVERTEMPSHUTDOWN ENABLE [current_design]
++# PS/Clock Wizard generated constraints define clocks. Every accelerator path is timed.
+diff --git a/boards/kv260/vivado/build.tcl b/boards/kv260/vivado/build.tcl
+new file mode 100644
+index 0000000000000000000000000000000000000000..cfe30a7b077f485603acc2d7f5de7ba9e451497a
+--- /dev/null
++++ b/boards/kv260/vivado/build.tcl
+@@ -0,0 +1,262 @@
++# Build only: this script contains no hardware-manager or programming commands.
++if {$argc != 1} {error "usage: build.tcl OUTPUT_DIRECTORY"}
++set out [file normalize [lindex $argv 0]]
++set inputs [file join $out inputs]
++source [file join $out config.tcl]
++set_param general.maxThreads 4
++proc record {path data} {set f [open $path w]; puts $f $data; close $f}
++proc one {objects description} {
++    if {[llength $objects] != 1} {error "Expected one $description, got $objects"}
++    return [lindex $objects 0]
++}
++proc pin {name} {return [one [get_bd_pins -quiet $name] "pin $name"]}
++proc net {src args} {
++    set p [list [pin $src]]
++    foreach dst $args {lappend p [pin $dst]}
++    connect_bd_net {*}$p
++}
++proc intf {src dst} {
++    connect_bd_intf_net [get_bd_intf_pins $src] [get_bd_intf_pins $dst]
++}
++proc ip {name vlnv props} {
++    set obj [create_bd_cell -type ip -vlnv $vlnv $name]
++    if {[llength $props]} {set_property -dict $props $obj}
++    return $obj
++}
++proc milestone {name} {
++    record [file join $::out stage.txt] "$name [clock format [clock seconds] -gmt 1 -format {%Y-%m-%dT%H:%M:%SZ}]"
++    puts "KV260_STAGE=$name"
++}
++proc timing_reports {phase} {
++    report_timing_summary -delay_type min_max -report_unconstrained -check_timing_verbose -file [file join $::out timing_${phase}.rpt]
++    report_timing -delay_type max -max_paths 20 -file [file join $::out paths_${phase}.rpt]
++    report_utilization -file [file join $::out utilization_${phase}.rpt]
++    report_utilization -hierarchical -hierarchical_depth 5 -file [file join $::out hierarchy_${phase}.rpt]
++}
++
++proc bus_skew_gate {out} {
++    # Bus skew is checked separately from report_timing_summary. With no scope
++    # filter, this summary includes every constraint, evaluated with min_max.
++    set skew [report_bus_skew -delay_type min_max -sort_by_slack -no_detailed_paths -return_string]
++    record [file join $out bus_skew.rpt] $skew
++    set xdc_path [file join $out inherited_constraints.xdc]
++    write_xdc -force $xdc_path
++    set f [open $xdc_path r]; set xdc [read $f]; close $f
++    set expected [regexp -all -line {^\s*set_bus_skew\s} $xdc]
++    set ids {}; set slacks {}; set inactive 0
++    foreach line [split $skew \n] {
++        if {[regexp {^\s*([0-9]+)\s+([0-9]+)\s+} $line unused id position]} {lappend ids $id}
++        if {[regexp {(Fast|Slow)\s+([-+0-9.]+)\s+([-+0-9.]+)\s+([-+0-9.]+)\s*$} $line unused corner requirement actual slack]} {lappend slacks $slack}
++        if {[regexp {NA\s+[-+0-9.]+\s+NA\s+NA\s*$} $line]} {incr inactive}
++    }
++    set count [llength $ids]
++    set worst NA
++    if {[llength $slacks]} {set worst [lindex [lsort -real $slacks] 0]}
++    record [file join $out bus_skew_metrics.txt] "XDC_CONSTRAINTS=$expected\nREPORTED_CONSTRAINTS=$count\nNUMERIC_RESULTS=[llength $slacks]\nINACTIVE_RESULTS=$inactive\nWORST_SLACK_NS=$worst"
++    if {$count != $expected || [llength [lsort -unique $ids]] != $count || [llength $slacks] != $count || $inactive} {
++        error "Incomplete bus-skew coverage; see bus_skew.rpt and inherited_constraints.xdc"
++    }
++    if {$worst ne "NA" && $worst < 0} {error "Routed bus skew fails; bitstream withheld"}
++    return [dict create constraints $count worst_slack $worst]
++}
++
++milestone create
++set board_repo [file join $::env(XILINX_VIVADO) data xhub boards XilinxBoardStore boards]
++if {[info exists ::env(BOARD_REPO)]} {set board_repo [file normalize $::env(BOARD_REPO)]}
++set_param board.repoPaths [list $board_repo]
++set board xilinx.com:kv260_som:part0:2.0
++one [get_board_parts -quiet $board] "official KV260 SOM preset"
++create_project -force opentpu_kv260 [file join $out project] -part xck26-sfvc784-2LV-c
++if {[info exists ::env(OTPU_KV260_IP_CACHE)]} {config_ip_cache -use_cache_location $::env(OTPU_KV260_IP_CACHE)}
++set_property board_part $board [current_project]
++set_property target_language Verilog [current_project]
++set_property simulator_language Mixed [current_project]
++set f [open [file join $out sources.txt] r]
++foreach rel [split [read $f] \n] {
++    if {$rel ne ""} {add_files -norecurse [file join $inputs $rel]}
++}
++close $f
++add_files -fileset constrs_1 -norecurse [file join $inputs boards/kv260/constraints/kv260.xdc]
++update_compile_order -fileset sources_1
++create_bd_design otpu_kv260_bd
++set ps [ip ps xilinx.com:ip:zynq_ultra_ps_e:3.5 {}]
++apply_bd_automation -rule xilinx.com:bd_rule:zynq_ultra_ps_e -config {apply_board_preset "1"} $ps
++set_property -dict [list \
++    CONFIG.PSU__FPGA_PL0_ENABLE 1 CONFIG.PSU__FPGA_PL1_ENABLE 0 \
++    CONFIG.PSU__FPGA_PL2_ENABLE 0 CONFIG.PSU__FPGA_PL3_ENABLE 0 \
++    CONFIG.PSU__CRL_APB__PL0_REF_CTRL__FREQMHZ 100 \
++    CONFIG.PSU__NUM_FABRIC_RESETS 1 CONFIG.PSU__USE__FABRIC__RST 1 \
++    CONFIG.PSU__USE__M_AXI_GP0 1 CONFIG.PSU__MAXIGP0__DATA_WIDTH 32 \
++    CONFIG.PSU__USE__M_AXI_GP1 0 CONFIG.PSU__USE__M_AXI_GP2 0 \
++    CONFIG.PSU__USE__S_AXI_GP0 1 CONFIG.PSU__SAXIGP0__DATA_WIDTH 128 \
++    CONFIG.PSU__USE__S_AXI_GP1 1 CONFIG.PSU__SAXIGP1__DATA_WIDTH 128 \
++    CONFIG.PSU__USE__S_AXI_GP2 0 CONFIG.PSU__USE__S_AXI_GP3 0 \
++    CONFIG.PSU__USE__S_AXI_GP4 0 CONFIG.PSU__USE__S_AXI_GP5 0 CONFIG.PSU__USE__S_AXI_GP6 0 \
++    CONFIG.PSU__USE__IRQ0 0 CONFIG.PSU__USE__IRQ1 0 \
++    CONFIG.PSU__GPIO_EMIO__PERIPHERAL__ENABLE 0 \
++    CONFIG.PSU__DISPLAYPORT__PERIPHERAL__ENABLE 0 CONFIG.PSU__DPAUX__PERIPHERAL__ENABLE 0] $ps
++set slow_hz [get_property CONFIG.FREQ_HZ [pin ps/pl_clk0]]
++ip coreClock xilinx.com:ip:clk_wiz:6.0 [list \
++    CONFIG.PRIM_SOURCE No_buffer CONFIG.PRIM_IN_FREQ [expr {$slow_hz/1000000.0}] \
++    CONFIG.JITTER_SEL Min_O_Jitter CONFIG.USE_MIN_O_JITTER true \
++    CONFIG.CLKOUT1_REQUESTED_OUT_FREQ $core_mhz CONFIG.USE_RESET true CONFIG.RESET_TYPE ACTIVE_LOW]
++ip zero xilinx.com:ip:xlconstant:1.1 [list CONFIG.CONST_WIDTH 1 CONFIG.CONST_VAL 0]
++foreach {name clock} {resetSlow ps/pl_clk0 resetCore coreClock/clk_out1} {
++    ip $name xilinx.com:ip:proc_sys_reset:5.0 [list CONFIG.C_AUX_RESET_HIGH 1 CONFIG.C_EXT_RESET_HIGH 0]
++    net $clock $name/slowest_sync_clk
++    net ps/pl_resetn0 $name/ext_reset_in
++    net zero/dout $name/aux_reset_in $name/mb_debug_sys_rst
++    net coreClock/locked $name/dcm_locked
++}
++net ps/pl_clk0 coreClock/clk_in1 ps/maxihpm0_fpd_aclk
++net ps/pl_resetn0 coreClock/resetn
++create_bd_cell -type module -reference otpu_kv260_core accelerator
++set core_hz [expr {round($core_mhz*1000000)}]
++set_property -dict [list CONFIG.CORE_KHZ [expr {$core_hz/1000}] CONFIG.BUILD_ID $build_id CONFIG.ARCH_HASH $arch_hash] [get_bd_cells accelerator]
++net coreClock/clk_out1 accelerator/clk ps/saxihpc0_fpd_aclk ps/saxihpc1_fpd_aclk
++net resetCore/peripheral_aresetn accelerator/resetn
++ip control xilinx.com:ip:smartconnect:1.0 [list CONFIG.NUM_SI 1 CONFIG.NUM_MI 1 CONFIG.NUM_CLKS 2]
++net ps/pl_clk0 control/aclk
++net coreClock/clk_out1 control/aclk1
++net resetSlow/peripheral_aresetn control/aresetn
++intf ps/M_AXI_HPM0_FPD control/S00_AXI
++intf control/M00_AXI accelerator/S_AXI_CTL
++for {set c 0} {$c < 2} {incr c} {
++    ip memory$c xilinx.com:ip:smartconnect:1.0 [list CONFIG.NUM_SI 1 CONFIG.NUM_MI 1]
++    net coreClock/clk_out1 memory$c/aclk
++    net resetCore/peripheral_aresetn memory$c/aresetn
++    intf accelerator/M_AXI_MEM$c memory$c/S00_AXI
++    intf memory$c/M00_AXI ps/S_AXI_HPC${c}_FPD
++    assign_bd_address -offset 0 -range 0x80000000 -force \
++        -target_address_space [get_bd_addr_spaces accelerator/M_AXI_MEM$c] \
++        [get_bd_addr_segs ps/SAXIGP${c}/HPC${c}_DDR_LOW]
++}
++assign_bd_address -offset 0xA0000000 -range 0x1000 -force \
++    -target_address_space [get_bd_addr_spaces ps/Data] \
++    [one [get_bd_addr_segs -of_objects [get_bd_intf_pins accelerator/S_AXI_CTL]] "accelerator register segment"]
++set fan [create_bd_port -dir O fan_en_b]
++connect_bd_net [pin zero/dout] $fan
++validate_bd_design
++save_bd_design
++write_bd_tcl -force [file join $out block_design.tcl]
++set bd [one [get_files -quiet */otpu_kv260_bd.bd] "block design"]
++generate_target all $bd
++set cache_usage {}
++foreach obj [get_ips] {
++    set def [get_property IPDEF $obj]
++    if {![string match "xilinx.com:module_ref:*" $def] && $def ni {xilinx.com:ip:xlconstant:1.1 xilinx.com:ip:xlconcat:2.1}} {
++        lappend cache_usage "$obj ID=[config_ip_cache -get_id $obj] USED=[config_ip_cache -cache_was_used $obj]"
++    }
++}
++record [file join $out vendor_ip_cache.txt] [join $cache_usage \n]
++make_wrapper -files $bd -top
++set wrapper [file join $out project opentpu_kv260.gen sources_1 bd otpu_kv260_bd hdl otpu_kv260_bd_wrapper.v]
++add_files -norecurse $wrapper
++set_property top otpu_kv260_bd_wrapper [current_fileset]
++update_compile_order -fileset sources_1
++record [file join $out contract.txt] "PART=xck26-sfvc784-2LV-c\nBOARD=$board\nVIVADO=[version -short]\nCORE_REQUESTED_HZ=$core_hz\nPS_REFERENCE_HZ=$slow_hz\nCONTROL_BASE=0xA0000000\nDDR_PHYSICAL_BASE=0x60000000\nDDR_BYTES=268435456\nPROGRAM_HARDWARE=0"
++milestone synthesis
++launch_runs synth_1 -jobs 3
++wait_on_run synth_1
++if {[get_property PROGRESS [get_runs synth_1]] ne "100%"} {error "Synthesis failed"}
++open_run synth_1
++write_checkpoint -force [file join $out synthesized.dcp]
++timing_reports synth
++set dsps [get_cells -hierarchical -quiet -filter {REF_NAME == DSP48E2}]
++if {[llength $dsps] < 256} {error "Missing native DSP48E2 matrix implementation: [llength $dsps]"}
++set urams [get_cells -hierarchical -quiet -filter {REF_NAME =~ URAM288*}]
++if {[llength $urams] != 32} {error "Expected 32 native activation UltraRAMs, got [llength $urams]"}
++if {[llength [get_cells -hierarchical -quiet -filter {IS_BLACKBOX == 1}]]} {error "Synthesis has black boxes"}
++if {$build_stage eq "synth"} {record [file join $out SYNTH_PASS] "Native synthesis passed"; exit 0}
++milestone optimize
++opt_design -directive Explore
++if {$incremental_reference} {
++    # The current source/clock constraints remain authoritative. This imports
++    # physical reuse guidance after optimizing the freshly synthesized design.
++    read_checkpoint -incremental -directive TimingClosure [file join $inputs implementation_reference.dcp]
++    report_incremental_reuse -file [file join $out incremental_reuse_initial.rpt]
++}
++milestone placement
++place_design -directive Explore
++phys_opt_design -directive AggressiveExplore
++write_checkpoint -force [file join $out placed.dcp]
++timing_reports place
++milestone routing
++if {$incremental_reference} {
++    # Explore is supported by Vivado's incremental/high-reuse router.
++    route_design -directive Explore
++} else {
++    route_design -directive AggressiveExplore
++}
++phys_opt_design -directive AggressiveExplore
++write_checkpoint -force [file join $out routed.dcp]
++if {$incremental_reference} {
++    report_incremental_reuse -file [file join $out incremental_reuse_route.rpt]
++}
++milestone signoff
++timing_reports route
++report_clock_utilization -file [file join $out clock_utilization.rpt]
++report_clocks -file [file join $out clocks.rpt]
++report_clock_interaction -file [file join $out clock_interaction.rpt]
++report_cdc -details -file [file join $out cdc.rpt]
++report_exceptions -file [file join $out exceptions.rpt]
++report_route_status -file [file join $out route_status.rpt]
++report_drc -file [file join $out drc.rpt]
++set check [check_timing -verbose -return_string]
++record [file join $out check_timing.rpt] $check
++set summary [report_timing_summary -delay_type min_max -report_unconstrained -check_timing_verbose -return_string]
++set fields {}
++set waiting 0
++foreach line [split $summary \n] {
++    if {[regexp {^\s*WNS\(ns\).*WPWS\(ns\)} $line]} {set waiting 1} elseif {$waiting && [regexp {^\s*[-+]?[0-9]+\.[0-9]+\s} $line]} {
++        set fields [regexp -all -inline {\S+} $line]; break
++    }
++}
++if {[llength $fields] != 12} {error "Cannot parse timing summary"}
++record [file join $out timing_metrics.txt] "CORE_MHZ=$core_mhz\nSETUP_WNS_NS=[lindex $fields 0]\nHOLD_WHS_NS=[lindex $fields 4]\nPULSE_WPWS_NS=[lindex $fields 8]\nSETUP_FAILING_ENDPOINTS=[lindex $fields 2]\nHOLD_FAILING_ENDPOINTS=[lindex $fields 6]\nPULSE_FAILING_ENDPOINTS=[lindex $fields 10]"
++foreach i {0 4 8} {
++    if {![string is double -strict [lindex $fields $i]] || [lindex $fields $i] < 0} {error "Routed timing fails; bitstream withheld"}
++}
++foreach i {2 6 10} {if {[lindex $fields $i] != 0} {error "Failing timing endpoints; bitstream withheld"}}
++foreach category {no_clock constant_clock pulse_width_clock unconstrained_internal_endpoints no_input_delay no_output_delay partial_input_delay partial_output_delay multiple_clock generated_clocks loops latch_loops} {
++    if {![regexp [format {checking %s \(([0-9]+)\)} $category] $check unused count] || $count != 0} {error "Timing coverage fails: $category"}
++}
++set errors [get_drc_violations -quiet -filter {SEVERITY == Error || SEVERITY == "Critical Warning"}]
++if {[llength $errors]} {error "Unresolved device-rule violations: $errors"}
++# Inspect every internal route status. Hierarchical segments may have no route
++# of their own, but must resolve to a routed segment; a net without loads needs
++# no physical route. Do not admit other states merely because they are not
++# spelled UNROUTED or PARTIAL.
++set exterior [get_nets -segments -of_objects [get_ports]]
++set route_counts [dict create]
++set route_failures {}
++foreach wire [get_nets -hierarchical] {
++    set state [get_property ROUTE_STATUS $wire]
++    dict incr route_counts $state
++    if {[lsearch -exact $exterior $wire] >= 0} {continue}
++    if {$state in {ROUTED INTRASITE}} {continue}
++    set loads [get_pins -quiet -leaf -of_objects $wire -filter {DIRECTION == IN}]
++    if {$state eq "NOLOADS" && ![llength $loads]} {continue}
++    if {$state eq "HIERPORT"} {
++        set resolved 0
++        foreach segment [get_nets -segments -of_objects [get_pins -quiet -of_objects $wire]] {
++            if {[get_property ROUTE_STATUS $segment] in {ROUTED INTRASITE}} {set resolved 1}
++        }
++        if {$resolved} {continue}
++    }
++    lappend route_failures "$wire $state LOADS=[llength $loads]"
++}
++record [file join $out routing_completeness.txt] "STATUS_COUNTS=$route_counts\nUNROUTED_INTERNAL_NETS=[llength $route_failures]\n[join $route_failures \n]"
++if {[llength $route_failures]} {error "Incomplete internal routing; see routing_completeness.txt"}
++set coreclk [one [get_clocks -of_objects [get_pins otpu_kv260_bd_i/accelerator/inst/clk]] "accelerator clock"]
++if {abs([get_property PERIOD $coreclk] - 1000.0/$core_mhz) > 0.001} {error "Incorrect accelerator clock period"}
++bus_skew_gate $out
++milestone bitstream
++write_bitstream -force -bin_file [file join $out opentpu_kv260.bit]
++# The implementation commands above run directly after open_run synth_1.
++# Export the fixed hardware description; its bitstream is the separate file
++# just generated. -include_bit requires a managed implementation-run bitfile.
++write_hw_platform -fixed -force -file [file join $out opentpu_kv260.xsa]
++record [file join $out PASS] "Routed setup, hold, pulse width, coverage, DRC and routing passed. Hardware not programmed."
++milestone complete
++exit 0
+diff --git a/opentpu/target.py b/opentpu/target.py
+index 4f8b2b02c91bf7ba68cdb37804e55fff4210700c..3ab431a29502c8bf35d4a42ce45cb7f570028feb 100644
+--- a/opentpu/target.py
++++ b/opentpu/target.py
+@@ -159,6 +159,7 @@ SHELL = ["shell/otpu_ctrl.sv", "shell/otpu_trace.sv", "shell/otpu_board.sv",
+          "shell/otpu_axi_split2.sv"]
+ BOARDS = {"ypcb-00338": ["boards/ypcb-00338/otpu_native_sys.sv",
+                          "boards/ypcb-00338/otpu_fpga_top_ld.sv"],
++          "kv260": ["mem/otpu_hbm_ch.sv", "boards/kv260/otpu_kv260_core.sv"],
+           "bcu1525": ["boards/bcu1525/otpu_bcu_sys.sv", "boards/bcu1525/otpu_bmc_watch.sv",
+                       "boards/bcu1525/otpu_bmc_uart.sv", "boards/bcu1525/otpu_bcu_gov.sv",
+                       "boards/bcu1525/otpu_axil_off.sv", "boards/bcu1525/otpu_axi_off.sv",
+diff --git a/rtl/boards/kv260/otpu_kv260_core.sv b/rtl/boards/kv260/otpu_kv260_core.sv
+new file mode 100644
+index 0000000000000000000000000000000000000000..f5378f009fa05b25bce3e05d453db0881ebdf0a7
+--- /dev/null
++++ b/rtl/boards/kv260/otpu_kv260_core.sv
+@@ -0,0 +1,343 @@
++// KV260 integration of the maintained openTPU board and memory bridges.
++// All logic uses clk, including both halves of the existing AXI memory bridges.
++// There are no user timing exceptions or extra clock domains in this wrapper.
++//
++// Logical memory is striped/hashed by otpu_native_dram into two 128 MiB
++// channels. Their physical PS DDR windows start at 0x60000000 and 0x68000000.
++// The software must reserve these windows and use the target's channel map.
++module otpu_kv260_core #(
++  parameter int CORE_KHZ = 200000,
++  parameter logic [31:0] BUILD_ID = 32'h0,
++  parameter logic [31:0] ARCH_HASH = 32'h0,
++  parameter int PLATFORM = 3
++) (
++  (* X_INTERFACE_INFO = "xilinx.com:signal:clock:1.0 clk CLK",
++     X_INTERFACE_PARAMETER = "XIL_INTERFACENAME clk, ASSOCIATED_BUSIF S_AXI_CTL:M_AXI_MEM0:M_AXI_MEM1, ASSOCIATED_RESET resetn" *)
++  input logic clk,
++  (* X_INTERFACE_INFO = "xilinx.com:signal:reset:1.0 resetn RST",
++     X_INTERFACE_PARAMETER = "XIL_INTERFACENAME resetn, POLARITY ACTIVE_LOW" *)
++  input logic resetn,
++  (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 S_AXI_CTL AWADDR",
++     X_INTERFACE_PARAMETER = "XIL_INTERFACENAME S_AXI_CTL, PROTOCOL AXI4LITE, ADDR_WIDTH 12, DATA_WIDTH 32, ID_WIDTH 0, HAS_BURST 0, HAS_CACHE 0, HAS_LOCK 0, HAS_PROT 0, HAS_QOS 0, HAS_REGION 0, SUPPORTS_NARROW_BURST 0, MAX_BURST_LENGTH 1" *)
++  input  logic [11:0]  s_axi_ctl_awaddr,
++  (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 S_AXI_CTL AWVALID" *)
++  input  logic         s_axi_ctl_awvalid,
++  (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 S_AXI_CTL AWREADY" *)
++  output logic         s_axi_ctl_awready,
++  (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 S_AXI_CTL WDATA" *)
++  input  logic [31:0]  s_axi_ctl_wdata,
++  (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 S_AXI_CTL WSTRB" *)
++  input  logic [3:0]   s_axi_ctl_wstrb,
++  (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 S_AXI_CTL WVALID" *)
++  input  logic         s_axi_ctl_wvalid,
++  (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 S_AXI_CTL WREADY" *)
++  output logic         s_axi_ctl_wready,
++  (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 S_AXI_CTL BRESP" *)
++  output logic [1:0]   s_axi_ctl_bresp,
++  (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 S_AXI_CTL BVALID" *)
++  output logic         s_axi_ctl_bvalid,
++  (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 S_AXI_CTL BREADY" *)
++  input  logic         s_axi_ctl_bready,
++  (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 S_AXI_CTL ARADDR" *)
++  input  logic [11:0]  s_axi_ctl_araddr,
++  (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 S_AXI_CTL ARVALID" *)
++  input  logic         s_axi_ctl_arvalid,
++  (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 S_AXI_CTL ARREADY" *)
++  output logic         s_axi_ctl_arready,
++  (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 S_AXI_CTL RDATA" *)
++  output logic [31:0]  s_axi_ctl_rdata,
++  (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 S_AXI_CTL RRESP" *)
++  output logic [1:0]   s_axi_ctl_rresp,
++  (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 S_AXI_CTL RVALID" *)
++  output logic         s_axi_ctl_rvalid,
++  (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 S_AXI_CTL RREADY" *)
++  input  logic         s_axi_ctl_rready,
++  (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI_MEM0 AWADDR",
++     X_INTERFACE_PARAMETER = "XIL_INTERFACENAME M_AXI_MEM0, PROTOCOL AXI4, ADDR_WIDTH 32, DATA_WIDTH 256, ID_WIDTH 0, HAS_BURST 1, HAS_CACHE 1, HAS_LOCK 1, HAS_PROT 1, HAS_QOS 0, HAS_REGION 0, SUPPORTS_NARROW_BURST 0, MAX_BURST_LENGTH 16" *)
++  output logic [31:0]  m_axi_mem0_awaddr,
++  (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI_MEM0 AWLEN" *)
++  output logic [7:0]   m_axi_mem0_awlen,
++  (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI_MEM0 AWSIZE" *)
++  output logic [2:0]   m_axi_mem0_awsize,
++  (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI_MEM0 AWBURST" *)
++  output logic [1:0]   m_axi_mem0_awburst,
++  (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI_MEM0 AWLOCK" *)
++  output logic         m_axi_mem0_awlock,
++  (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI_MEM0 AWCACHE" *)
++  output logic [3:0]   m_axi_mem0_awcache,
++  (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI_MEM0 AWPROT" *)
++  output logic [2:0]   m_axi_mem0_awprot,
++  (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI_MEM0 AWVALID" *)
++  output logic         m_axi_mem0_awvalid,
++  (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI_MEM0 AWREADY" *)
++  input  logic         m_axi_mem0_awready,
++  (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI_MEM0 WDATA" *)
++  output logic [255:0] m_axi_mem0_wdata,
++  (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI_MEM0 WSTRB" *)
++  output logic [31:0]  m_axi_mem0_wstrb,
++  (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI_MEM0 WLAST" *)
++  output logic         m_axi_mem0_wlast,
++  (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI_MEM0 WVALID" *)
++  output logic         m_axi_mem0_wvalid,
++  (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI_MEM0 WREADY" *)
++  input  logic         m_axi_mem0_wready,
++  (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI_MEM0 BRESP" *)
++  input  logic [1:0]   m_axi_mem0_bresp,
++  (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI_MEM0 BVALID" *)
++  input  logic         m_axi_mem0_bvalid,
++  (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI_MEM0 BREADY" *)
++  output logic         m_axi_mem0_bready,
++  (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI_MEM0 ARADDR" *)
++  output logic [31:0]  m_axi_mem0_araddr,
++  (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI_MEM0 ARLEN" *)
++  output logic [7:0]   m_axi_mem0_arlen,
++  (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI_MEM0 ARSIZE" *)
++  output logic [2:0]   m_axi_mem0_arsize,
++  (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI_MEM0 ARBURST" *)
++  output logic [1:0]   m_axi_mem0_arburst,
++  (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI_MEM0 ARLOCK" *)
++  output logic         m_axi_mem0_arlock,
++  (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI_MEM0 ARCACHE" *)
++  output logic [3:0]   m_axi_mem0_arcache,
++  (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI_MEM0 ARPROT" *)
++  output logic [2:0]   m_axi_mem0_arprot,
++  (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI_MEM0 ARVALID" *)
++  output logic         m_axi_mem0_arvalid,
++  (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI_MEM0 ARREADY" *)
++  input  logic         m_axi_mem0_arready,
++  (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI_MEM0 RDATA" *)
++  input  logic [255:0] m_axi_mem0_rdata,
++  (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI_MEM0 RRESP" *)
++  input  logic [1:0]   m_axi_mem0_rresp,
++  (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI_MEM0 RLAST" *)
++  input  logic         m_axi_mem0_rlast,
++  (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI_MEM0 RVALID" *)
++  input  logic         m_axi_mem0_rvalid,
++  (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI_MEM0 RREADY" *)
++  output logic         m_axi_mem0_rready,
++  (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI_MEM1 AWADDR",
++     X_INTERFACE_PARAMETER = "XIL_INTERFACENAME M_AXI_MEM1, PROTOCOL AXI4, ADDR_WIDTH 32, DATA_WIDTH 256, ID_WIDTH 0, HAS_BURST 1, HAS_CACHE 1, HAS_LOCK 1, HAS_PROT 1, HAS_QOS 0, HAS_REGION 0, SUPPORTS_NARROW_BURST 0, MAX_BURST_LENGTH 16" *)
++  output logic [31:0]  m_axi_mem1_awaddr,
++  (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI_MEM1 AWLEN" *)
++  output logic [7:0]   m_axi_mem1_awlen,
++  (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI_MEM1 AWSIZE" *)
++  output logic [2:0]   m_axi_mem1_awsize,
++  (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI_MEM1 AWBURST" *)
++  output logic [1:0]   m_axi_mem1_awburst,
++  (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI_MEM1 AWLOCK" *)
++  output logic         m_axi_mem1_awlock,
++  (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI_MEM1 AWCACHE" *)
++  output logic [3:0]   m_axi_mem1_awcache,
++  (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI_MEM1 AWPROT" *)
++  output logic [2:0]   m_axi_mem1_awprot,
++  (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI_MEM1 AWVALID" *)
++  output logic         m_axi_mem1_awvalid,
++  (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI_MEM1 AWREADY" *)
++  input  logic         m_axi_mem1_awready,
++  (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI_MEM1 WDATA" *)
++  output logic [255:0] m_axi_mem1_wdata,
++  (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI_MEM1 WSTRB" *)
++  output logic [31:0]  m_axi_mem1_wstrb,
++  (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI_MEM1 WLAST" *)
++  output logic         m_axi_mem1_wlast,
++  (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI_MEM1 WVALID" *)
++  output logic         m_axi_mem1_wvalid,
++  (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI_MEM1 WREADY" *)
++  input  logic         m_axi_mem1_wready,
++  (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI_MEM1 BRESP" *)
++  input  logic [1:0]   m_axi_mem1_bresp,
++  (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI_MEM1 BVALID" *)
++  input  logic         m_axi_mem1_bvalid,
++  (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI_MEM1 BREADY" *)
++  output logic         m_axi_mem1_bready,
++  (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI_MEM1 ARADDR" *)
++  output logic [31:0]  m_axi_mem1_araddr,
++  (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI_MEM1 ARLEN" *)
++  output logic [7:0]   m_axi_mem1_arlen,
++  (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI_MEM1 ARSIZE" *)
++  output logic [2:0]   m_axi_mem1_arsize,
++  (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI_MEM1 ARBURST" *)
++  output logic [1:0]   m_axi_mem1_arburst,
++  (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI_MEM1 ARLOCK" *)
++  output logic         m_axi_mem1_arlock,
++  (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI_MEM1 ARCACHE" *)
++  output logic [3:0]   m_axi_mem1_arcache,
++  (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI_MEM1 ARPROT" *)
++  output logic [2:0]   m_axi_mem1_arprot,
++  (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI_MEM1 ARVALID" *)
++  output logic         m_axi_mem1_arvalid,
++  (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI_MEM1 ARREADY" *)
++  input  logic         m_axi_mem1_arready,
++  (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI_MEM1 RDATA" *)
++  input  logic [255:0] m_axi_mem1_rdata,
++  (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI_MEM1 RRESP" *)
++  input  logic [1:0]   m_axi_mem1_rresp,
++  (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI_MEM1 RLAST" *)
++  input  logic         m_axi_mem1_rlast,
++  (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI_MEM1 RVALID" *)
++  input  logic         m_axi_mem1_rvalid,
++  (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI_MEM1 RREADY" *)
++  output logic         m_axi_mem1_rready
++);
++  wire rst = !resetn;
++  localparam int NCH = 2, CB = 64, CAW = 21, XSW = 7;
++
++  logic [NCH-1:0] n_cvalid, n_cready, n_cwe;
++  logic [NCH-1:0][CAW-1:0] n_caddr;
++  logic [NCH-1:0][1:0] n_csrc;
++  logic [NCH-1:0][XSW-1:0] n_cslot;
++  logic [NCH-1:0] n_wvalid, n_wready, n_rvalid, n_err;
++  logic [NCH-1:0][CB*8-1:0] n_wdata, n_rdata;
++  logic [NCH-1:0][CB-1:0] n_wmask;
++  logic [NCH-1:0][15:0] n_wdone;
++  logic [NCH-1:0][5:0] n_wfree;
++
++  logic [NCH-1:0] m_awvalid, m_awready, m_wvalid, m_wready, m_wlast;
++  logic [NCH-1:0] m_bvalid, m_bready, m_arvalid, m_arready, m_rvalid, m_rready, m_rlast;
++  logic [NCH-1:0][31:0] m_awaddr, m_araddr;
++  logic [NCH-1:0][3:0] m_awlen, m_arlen;
++  logic [NCH-1:0][255:0] m_wdata, m_rdata;
++  logic [NCH-1:0][31:0] m_wstrb;
++  logic [NCH-1:0][1:0] m_bresp, m_rresp;
++
++  otpu_board #(
++    .S(1), .D(128), .MCOLS(2), .ACT_BLOCKS(64), .ACT_ROWS(4),
++    .TMEM_WORDS(16384), .IMEM_WORDS(16384), .FIFO_DEPTH(128),
++    .LANES(8), .WIN(16), .RPB(64), .WPB(1),
++    .MXU_IMPL(2), .MXU_CL(16), .MXU_E(2), .VPU_CL(2), .ULANES(4),
++    .TMEM_IMPL(3), .TMEM_NSB(1), .TMEM_SBP(3), .TMEM_SBH(0),
++    .TMEM_RPL(1'b1), .TMEM_TDP(1'b1), .TMEM_GST(1'b1), .TMEM_PMP(0),
++    .IMEM_STYLE("block"), .IMEM_WC_STYLE("block"), .ACT_UCOLS(2),
++    .CORE_KHZ(CORE_KHZ), .BUILD_ID(BUILD_ID),
++    .TRACE_DEPTH(0), .HAS_I2C(1'b0), .HAS_BMC(1'b0), .HOSTCAL(1'b0),
++    .CHASH(1'b1), .DSTEP(1'b1), .SEQ_WC(1'b1),
++    .PLATFORM(PLATFORM), .ARCH_HASH(ARCH_HASH),
++    .NCH(NCH), .CB(CB), .NAT_RD(32), .NAT_AD(16), .NAT_APF(8),
++    .NAT_XD(16), .NAT_WQD(8), .NAT_FILL(1'b0),
++    .DRAM_LOG2(28), .CH_LOG2(27)
++  ) u_board (
++    .clk, .clk_f(clk), .rst, .ctl_mrst(rst),
++    .calib(2'b11), .ded(2'b00), .temp(12'd0), .led(),
++    .i2c_lo(), .i2c_pin(5'b11111),
++    .x2_s_tdata(), .x2_s_tvalid(), .x2_s_tlast(), .x2_s_tready(2'b00),
++    .x2_m_tdata('0), .x2_m_tvalid(2'b00), .x2_m_tlast(2'b00),
++    .x2_m_thdr(2'b00), .x2_m_tready(), .x2_up(2'b00), .x2_rx_err(2'b00),
++    .x2_abort_in(2'b00), .x2_abort(), .x2_rst(), .x2_card(), .x2_ncards(),
++    .x2_c_we(), .x2_c_addr(), .x2_c_wd(), .x2_c_rd(32'd0),
++    .s_ctl_awaddr(s_axi_ctl_awaddr),
++    .s_ctl_awvalid(s_axi_ctl_awvalid),
++    .s_ctl_awready(s_axi_ctl_awready),
++    .s_ctl_wdata(s_axi_ctl_wdata),
++    .s_ctl_wstrb(s_axi_ctl_wstrb),
++    .s_ctl_wvalid(s_axi_ctl_wvalid),
++    .s_ctl_wready(s_axi_ctl_wready),
++    .s_ctl_bresp(s_axi_ctl_bresp),
++    .s_ctl_bvalid(s_axi_ctl_bvalid),
++    .s_ctl_bready(s_axi_ctl_bready),
++    .s_ctl_araddr(s_axi_ctl_araddr),
++    .s_ctl_arvalid(s_axi_ctl_arvalid),
++    .s_ctl_arready(s_axi_ctl_arready),
++    .s_ctl_rdata(s_axi_ctl_rdata),
++    .s_ctl_rresp(s_axi_ctl_rresp),
++    .s_ctl_rvalid(s_axi_ctl_rvalid),
++    .s_ctl_rready(s_axi_ctl_rready),
++    .n_cvalid, .n_cready, .n_cwe, .n_caddr, .n_wvalid, .n_wready, .n_wdata, .n_wmask,
++    .n_rvalid, .n_rdata, .n_wdone, .n_wfree, .n_err, .n_csrc, .n_cslot,
++    .p_clk(clk), .p_we('0), .p_q('0), .p_slot('0), .p_d('0), .p_cntg('0)
++  );
++
++  for (genvar c = 0; c < NCH; c++) begin : g_mem
++    otpu_hbm_ch #(
++      .CB(CB), .CAW(CAW), .PC(5'd0), .OAW(32), .ARD(32), .CQD(16),
++      .WDD(32), .WOT(16), .NBK(32), .WPOST(1'b0), .N(0), .WH(1'b0),
++      .ACQ(16), .AWD(32), .RCD(64), .PST(1), .XSW(XSW)
++    ) u_bridge (
++      .clk, .rst, .n_cvalid(n_cvalid[c]), .n_cready(n_cready[c]),
++      .n_cwe(n_cwe[c]), .n_caddr(n_caddr[c]), .n_csrc(n_csrc[c]), .n_cslot(n_cslot[c]),
++      .n_wvalid(n_wvalid[c]), .n_wready(n_wready[c]), .n_wfree(n_wfree[c]),
++      .n_wdata(n_wdata[c]), .n_wmask(n_wmask[c]), .n_rvalid(n_rvalid[c]),
++      .n_rdata(n_rdata[c]), .n_wdone(n_wdone[c]), .n_err(n_err[c]),
++      .p_we(), .p_q(), .p_slot(), .p_d(), .p_cntg(),
++      .aclk(clk), .arst(rst), .mwait(6'd8),
++      .m_awvalid(m_awvalid[c]), .m_awready(m_awready[c]),
++      .m_awaddr(m_awaddr[c]), .m_awlen(m_awlen[c]),
++      .m_wvalid(m_wvalid[c]), .m_wready(m_wready[c]), .m_wdata(m_wdata[c]),
++      .m_wstrb(m_wstrb[c]), .m_wlast(m_wlast[c]),
++      .m_bvalid(m_bvalid[c]), .m_bready(m_bready[c]), .m_bresp(m_bresp[c]),
++      .m_arvalid(m_arvalid[c]), .m_arready(m_arready[c]),
++      .m_araddr(m_araddr[c]), .m_arlen(m_arlen[c]),
++      .m_rvalid(m_rvalid[c]), .m_rready(m_rready[c]), .m_rdata(m_rdata[c]),
++      .m_rresp(m_rresp[c]), .m_rlast(m_rlast[c]), .ev(), .ev_n()
++    );
++  end
++
++  // Channel 0: its 128 MiB window is aligned, so the address translation
++  // is wiring into constant high bits and preserves every burst boundary.
++  assign m_axi_mem0_awaddr = {5'b01100, m_awaddr[0][26:0]};
++  assign m_axi_mem0_awlen = {4'd0, m_awlen[0]};
++  assign m_axi_mem0_awsize = 3'd5;
++  assign m_axi_mem0_awburst = 2'b01;
++  assign m_axi_mem0_awlock = 1'b0;
++  assign m_axi_mem0_awcache = 4'b0011;
++  assign m_axi_mem0_awprot = 3'b000;
++  assign m_axi_mem0_awvalid = m_awvalid[0];
++  assign m_awready[0] = m_axi_mem0_awready;
++  assign m_axi_mem0_wdata = m_wdata[0];
++  assign m_axi_mem0_wstrb = m_wstrb[0];
++  assign m_axi_mem0_wlast = m_wlast[0];
++  assign m_axi_mem0_wvalid = m_wvalid[0];
++  assign m_wready[0] = m_axi_mem0_wready;
++  assign m_bresp[0] = m_axi_mem0_bresp;
++  assign m_bvalid[0] = m_axi_mem0_bvalid;
++  assign m_axi_mem0_bready = m_bready[0];
++  assign m_axi_mem0_araddr = {5'b01100, m_araddr[0][26:0]};
++  assign m_axi_mem0_arlen = {4'd0, m_arlen[0]};
++  assign m_axi_mem0_arsize = 3'd5;
++  assign m_axi_mem0_arburst = 2'b01;
++  assign m_axi_mem0_arlock = 1'b0;
++  assign m_axi_mem0_arcache = 4'b0011;
++  assign m_axi_mem0_arprot = 3'b000;
++  assign m_axi_mem0_arvalid = m_arvalid[0];
++  assign m_arready[0] = m_axi_mem0_arready;
++  assign m_rdata[0] = m_axi_mem0_rdata;
++  assign m_rresp[0] = m_axi_mem0_rresp;
++  assign m_rlast[0] = m_axi_mem0_rlast;
++  assign m_rvalid[0] = m_axi_mem0_rvalid;
++  assign m_axi_mem0_rready = m_rready[0];
++
++  // Channel 1: its 128 MiB window is aligned, so the address translation
++  // is wiring into constant high bits and preserves every burst boundary.
++  assign m_axi_mem1_awaddr = {5'b01101, m_awaddr[1][26:0]};
++  assign m_axi_mem1_awlen = {4'd0, m_awlen[1]};
++  assign m_axi_mem1_awsize = 3'd5;
++  assign m_axi_mem1_awburst = 2'b01;
++  assign m_axi_mem1_awlock = 1'b0;
++  assign m_axi_mem1_awcache = 4'b0011;
++  assign m_axi_mem1_awprot = 3'b000;
++  assign m_axi_mem1_awvalid = m_awvalid[1];
++  assign m_awready[1] = m_axi_mem1_awready;
++  assign m_axi_mem1_wdata = m_wdata[1];
++  assign m_axi_mem1_wstrb = m_wstrb[1];
++  assign m_axi_mem1_wlast = m_wlast[1];
++  assign m_axi_mem1_wvalid = m_wvalid[1];
++  assign m_wready[1] = m_axi_mem1_wready;
++  assign m_bresp[1] = m_axi_mem1_bresp;
++  assign m_bvalid[1] = m_axi_mem1_bvalid;
++  assign m_axi_mem1_bready = m_bready[1];
++  assign m_axi_mem1_araddr = {5'b01101, m_araddr[1][26:0]};
++  assign m_axi_mem1_arlen = {4'd0, m_arlen[1]};
++  assign m_axi_mem1_arsize = 3'd5;
++  assign m_axi_mem1_arburst = 2'b01;
++  assign m_axi_mem1_arlock = 1'b0;
++  assign m_axi_mem1_arcache = 4'b0011;
++  assign m_axi_mem1_arprot = 3'b000;
++  assign m_axi_mem1_arvalid = m_arvalid[1];
++  assign m_arready[1] = m_axi_mem1_arready;
++  assign m_rdata[1] = m_axi_mem1_rdata;
++  assign m_rresp[1] = m_axi_mem1_rresp;
++  assign m_rlast[1] = m_axi_mem1_rlast;
++  assign m_rvalid[1] = m_axi_mem1_rvalid;
++  assign m_axi_mem1_rready = m_rready[1];
++
++endmodule
++
+diff --git a/rtl/mxu/otpu_mxu.sv b/rtl/mxu/otpu_mxu.sv
+index bb74e8af7e10ece16e69e3a7468e8304abf3642f..54c3e807d71e2b9712174f3a45e054b4fb76fc0f 100644
+--- a/rtl/mxu/otpu_mxu.sv
++++ b/rtl/mxu/otpu_mxu.sv
+@@ -2452,16 +2452,16 @@ module otpu_mxu
+   assign rw = rwp;
+   logic [3:0] rmw_n;                          // rows' lanes in flight (any nonzero = busy)
+ 
+-  // RMAX: the running max is kept as its sort key (mk = fkey(max); the max is always stored
++  // RMAX: the running max is kept as its sort key (max_key = fkey(max); the max is always stored
+   // ftz'd, so fkey(max) is the key it is compared by); written out through unkey.
+-  logic [31:0] mk [MCOLS];
++  logic [31:0] max_key [MCOLS];
+   logic [MCOLS-1:0] mx_have;
+   logic mx_done;
+   function automatic f32_t unkey(input logic [31:0] k);
+     return k[31] ? {1'b0, k[30:0]} : ~k;
+   endfunction
+   // rw's column hits, one-hot, computed from r1 and carried alongside u_rw (same length and
+-  // enable; reset, as its valids: a hit updates mk and mx_have); the last stage a flop, not an
++  // enable; reset, as its valids: a hit updates max_key and mx_have); the last stage a flop, not an
+   // SRL tap. c_rmax is fixed while entries are in flight (the head changes only once drained)
+   logic [NL-1:0][MCOLS-1:0] rh, rh_p, rwh, rxh;
+   always_comb
+@@ -2475,10 +2475,10 @@ module otpu_mxu
+   // per column: the candidate key is selected by the hits alone. At most one lane hits a column
+   // per cycle (lanes drain distinct columns) and rx / rw are exclusive (rx only for !c_acc
+   // commands, rw only for c_acc ones). The compare is a stage later: each column's hit and key
+-  // are registered at the advance (mq_h, mq_k) and compared with mk, and applied, the cycle after,
++  // are registered at the advance (mq_h, mq_k) and compared with max_key, and applied, the cycle after,
+   // advance or not (fkey of the fmadd's sum, the lanes' selection, a 32-bit compare and the
+   // update's enable were one cycle: the m8 card at a 150 MHz equivalent, -0.057 ns, 10 levels).
+-  // The running max holds: each column's keys reach mk one at a time, in order, each compared
++  // The running max holds: each column's keys reach max_key one at a time, in order, each compared
+   // with the max of those before it; a command completes only with the stage empty (c_drained).
+   // WG > 1: a drain step's lanes are one result row's, all against one activation row (their
+   // column), so a stage first takes the lanes' keys, a pair's max each (ql), then their max
+@@ -2500,7 +2500,7 @@ module otpu_mxu
+           mx_cand[j] = mx_cand[j] | fkey(ry[k]);
+         end
+       end
+-      mx_upd[j] = mq_h[j] && (!mx_have[j] || mq_k[j] > mk[j]);
++      mx_upd[j] = mq_h[j] && (!mx_have[j] || mq_k[j] > max_key[j]);
+     end
+   if (WG > 1) begin : g_mxg
+     localparam int NQ = (NL + 1) / 2;
+@@ -2657,7 +2657,7 @@ module otpu_mxu
+         if (mxm[k]) begin
+           tw_en[k] = 1'b1;
+           tw_ad[k] = mxl[k];
+-          tw_d[k] = unkey(mk[MW'(32'(mx_i) + 32'(k))]);
++          tw_d[k] = unkey(max_key[MW'(32'(mx_i) + 32'(k))]);
+         end
+       end
+     end
+@@ -3153,7 +3153,7 @@ module otpu_mxu
+       end
+       // ---- RMAX: the stage's keys into the running max (every cycle), the advance's hits into it
+       for (int j = 0; j < MCOLS; j++) begin
+-        if (mx_upd[j]) mk[j] <= mq_k[j];
++        if (mx_upd[j]) max_key[j] <= mq_k[j];
+         if (mq_h[j]) mx_have[j] <= 1'b1;
+       end
+       mq_h <= mq_hn;
+diff --git a/rtl/top/otpu_coll.sv b/rtl/top/otpu_coll.sv
+index c182f93a4d13a465f04a668570e5539a27c0c56c..2b8e53df987ad8fcfcc0037ea62da41811655253 100644
+--- a/rtl/top/otpu_coll.sv
++++ b/rtl/top/otpu_coll.sv
+@@ -181,7 +181,13 @@ module otpu_coll
+             end
+             c <= nc; rrow <= nrrow;
+             ra <= nrrow + nc;
+-            for (int l = 0; l < LANES; l++) rm[l] <= (nc + 32'(l) < 32'(cols));
++            // Compare both next-row and next-chunk lane positions in parallel;
++            // the row-end selection then follows the comparisons, rather than
++            // feeding another adder and comparator through nc.
++            for (int l = 0; l < LANES; l++)
++              rm[l] <= (c + LANES >= 32'(cols))
++                         ? (32'(l) < 32'(cols))
++                         : (c + 32'(LANES + l) < 32'(cols));
+           end
+           if (pv && ps + 1 == S && pr + 1 == 32'(rows) && pcl + LANES >= 32'(cols))
+             pv <= 1'b0;                                 // the last read's data moves to q
+diff --git a/targets/kv260.toml b/targets/kv260.toml
+new file mode 100644
+index 0000000000000000000000000000000000000000..e93ad4f59427fdd4a45f7cecca3cd5536abe1386
+--- /dev/null
++++ b/targets/kv260.toml
+@@ -0,0 +1,69 @@
++# First KV260 implementation: full openTPU instruction set, two PS DDR channels.
++# The host must reserve physical 0x60000000..0x6fffffff (see boards/kv260/README.md).
++[target]
++name = "kv260"
++kind = "fpga"
++platform_id = 3
++description = "Kria KV260, K26 UltraScale+, two HPC DDR paths, PS AXI-Lite control"
++
++[arch]
++S = 1
++D = 128
++MCOLS = 2
++ACT_BLOCKS = 64
++ACT_ROWS = 4
++TMEM_WORDS = 16384
++IMEM_WORDS = 16384
++DRAM_BYTES = 268435456
++LANES = 8
++PAIR = true
++DSTEP = true
++STREAM = true
++SEQ_WC = true
++
++[uarch]
++MXU_IMPL = 2
++MXU_CL = 16
++MXU_E = 2
++VPU_CL = 2
++ULANES = 4
++TMEM_IMPL = 3
++TMEM_NSB = 1
++TMEM_SBP = 3
++TMEM_SBH = 0
++TMEM_RPL = true
++TMEM_TDP = true
++TMEM_GST = true
++TMEM_PMP = 0
++TMEM_PRK = 0
++TMEM_SDM = -1
++IMEM_STYLE = "block"
++IMEM_WC_STYLE = "block"
++ACT_UCOLS = 2
++RPB = 0
++WPB = 1
++WIN = 16
++FIFO_DEPTH = 128
++TRACE_DEPTH = 0
++PQ_WIN = 1024
++CHASH = true
++NAT_RD = 32
++NAT_AD = 16
++NAT_APF = 8
++NAT_XD = 16
++NAT_WQD = 8
++NAT_FILL = false
++
++[tech]
++family = "xilinxus"
++vendor = "amd"
++part = "xck26-sfvc784-2LV-c"
++
++[platform]
++board = "kv260"
++core_mhz = 200.0
++mem = "ps-ddr4"
++channels_per_slice = 2
++channel_bytes = 134217728
++beat_bytes = 64
++host = "ps-axi"
